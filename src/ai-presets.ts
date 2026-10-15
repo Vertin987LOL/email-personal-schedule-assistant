@@ -90,11 +90,11 @@ export const AI_PROVIDER_PRESETS: readonly AiProviderPreset[] = [
     providerName: "DeepSeek",
     baseUrl: "https://api.deepseek.com",
     protocol: "openai-chat",
-    model: "deepseek-v4-flash",
+    model: "deepseek-flash",
     multimodalEnabled: false,
     multimodalBaseUrl: "https://api.deepseek.com",
     multimodalProtocol: "same",
-    multimodalModel: "deepseek-v4-flash"
+    multimodalModel: "deepseek-flash"
   },
   {
     id: "qwen",
