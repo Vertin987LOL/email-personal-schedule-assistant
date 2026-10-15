@@ -25,6 +25,7 @@ const {
   recordQqNotificationReference,
   readMailboxes,
   readMailCursor,
+  readFetchedMails,
   readProcessingRuns,
   readQqBotBindings,
   readQqBotConfig,
@@ -54,6 +55,7 @@ const {
   recordAiUsageEvent,
   saveAiCostSnapshot,
   saveMailCursor,
+  commitFetched,
   updateState,
   undoProcessedEmailsPanelRead
 } = await import("./store");
@@ -784,6 +786,65 @@ test("mail cursors persist with owner and mailbox scope", () => {
 
   updateState(() => {});
   assert.equal(readMailCursor("owner-a", "mailbox-a", "INBOX")?.lastUid, "18");
+});
+
+test("commitFetched atomically stores raw mail and cursor with owner isolation", () => {
+  const batch = [{
+    key: { ownerId: "owner-c", mailboxId: "mailbox-c", folder: "INBOX", uidValidity: "9", uid: "3" },
+    receivedAt: "2026-10-16T00:00:00.000Z",
+    rawBytes: new Uint8Array(Buffer.from("Subject: stored\r\n\r\nbody")),
+    oversized: false,
+    sizeBytes: 24
+  }];
+  const committed = commitFetched(batch, {
+    ownerId: "owner-c",
+    mailboxId: "mailbox-c",
+    folder: "INBOX",
+    uidValidity: "9",
+    lastUid: "3"
+  });
+  assert.equal(committed.ok, true);
+  assert.equal(readMailCursor("owner-c", "mailbox-c", "INBOX")?.lastUid, "3");
+  assert.equal(readFetchedMails("owner-c", "mailbox-c", "INBOX").length, 1);
+  assert.equal(readFetchedMails("owner-d", "mailbox-c", "INBOX").length, 0);
+
+  const repeated = commitFetched(batch, {
+    ownerId: "owner-c",
+    mailboxId: "mailbox-c",
+    folder: "INBOX",
+    uidValidity: "9",
+    lastUid: "3"
+  });
+  assert.equal(repeated.ok, true);
+  assert.equal(readFetchedMails("owner-c", "mailbox-c", "INBOX").length, 1);
+});
+
+test("commitFetched rejects an incomplete batch without moving cursor or storing rows", () => {
+  const result = commitFetched([
+    {
+      key: { ownerId: "owner-e", mailboxId: "mailbox-e", folder: "INBOX", uidValidity: "10", uid: "1" },
+      receivedAt: "2026-10-16T00:00:00.000Z",
+      rawBytes: new Uint8Array(Buffer.from("raw")),
+      oversized: false,
+      sizeBytes: 3
+    },
+    {
+      key: { ownerId: "owner-e", mailboxId: "mailbox-e", folder: "INBOX", uidValidity: "10", uid: "2" },
+      receivedAt: "2026-10-16T00:01:00.000Z",
+      oversized: false,
+      sizeBytes: 99
+    }
+  ], {
+    ownerId: "owner-e",
+    mailboxId: "mailbox-e",
+    folder: "INBOX",
+    uidValidity: "10",
+    lastUid: "2"
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(readMailCursor("owner-e", "mailbox-e", "INBOX"), undefined);
+  assert.equal(readFetchedMails("owner-e", "mailbox-e", "INBOX").length, 0);
 });
 test("notification delivery claims are exclusive and stale sends recover", () => {
   const sqlite = new DatabaseSync(path.join(process.env.DATA_DIR!, "app.sqlite"));

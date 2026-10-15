@@ -6,6 +6,7 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { createAuthSettings, isDefaultPassword, verifyPassword } from "./auth-crypto";
 import { decryptCredential, encryptCredential } from "./credential-crypto";
 import { publishAppEvent } from "./events";
+import type { Cursor, RawMail } from "./email/mail-reader";
 import type {
   AiSettings,
   AiBillingProvider,
@@ -68,6 +69,10 @@ type PanelReadUndoOperation = {
   emailIds: string[];
   expiresAtMs: number;
 };
+
+export type DigestStoreResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: { code: "INVALID_INPUT" | "STORAGE"; retryable: boolean; message: string } };
 
 const panelReadUndoOperations = new Map<string, PanelReadUndoOperation>();
 
@@ -184,6 +189,23 @@ db.exec(`
     updatedAt TEXT NOT NULL,
     PRIMARY KEY (ownerId, mailboxId, folder)
   );
+
+  CREATE TABLE IF NOT EXISTS fetched_mails (
+    ownerId TEXT NOT NULL,
+    mailboxId TEXT NOT NULL,
+    folder TEXT NOT NULL,
+    uidValidity TEXT NOT NULL,
+    uid TEXT NOT NULL,
+    receivedAt TEXT NOT NULL,
+    oversized INTEGER NOT NULL,
+    sizeBytes INTEGER NOT NULL,
+    rawBytes BLOB,
+    storedAt TEXT NOT NULL,
+    PRIMARY KEY (ownerId, mailboxId, folder, uidValidity, uid)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_fetched_mails_scope
+    ON fetched_mails(ownerId, mailboxId, folder, uidValidity, uid);
 
   CREATE TABLE IF NOT EXISTS emails (
     id TEXT PRIMARY KEY,
@@ -999,6 +1021,117 @@ export function saveMailCursor(cursor: Omit<MailCursor, "updatedAt">): MailCurso
   return saved;
 }
 
+function fetchedMailError(message: string): DigestStoreResult<never> {
+  return { ok: false, error: { code: "INVALID_INPUT", retryable: false, message } };
+}
+
+function numericUid(value: string) {
+  if (!/^\d+$/.test(value)) return undefined;
+  const uid = Number(value);
+  return Number.isSafeInteger(uid) && uid >= 0 ? uid : undefined;
+}
+
+function validateFetchedBatch(batch: RawMail[], cursor: Cursor) {
+  if (!cursor.ownerId || !cursor.mailboxId || !cursor.folder || !cursor.uidValidity) return "游标缺少归属、邮箱、文件夹或 UIDVALIDITY";
+  const lastUid = numericUid(cursor.lastUid);
+  if (lastUid === undefined) return "游标 UID 无效";
+
+  let previousUid = 0;
+  const keys = new Set<string>();
+  for (const mail of batch) {
+    if (
+      mail.key.ownerId !== cursor.ownerId ||
+      mail.key.mailboxId !== cursor.mailboxId ||
+      mail.key.folder !== cursor.folder ||
+      mail.key.uidValidity !== cursor.uidValidity
+    ) return "邮件键与游标不匹配";
+    const uid = numericUid(mail.key.uid);
+    if (uid === undefined || uid <= previousUid || uid > lastUid) return "邮件 UID 必须升序且不超过游标";
+    if (keys.has(mail.key.uid)) return "批次包含重复邮件 UID";
+    if (!mail.oversized && !mail.rawBytes) return "非超大邮件必须包含原文";
+    keys.add(mail.key.uid);
+    previousUid = uid;
+  }
+  return undefined;
+}
+
+export function commitFetched(batch: RawMail[], cursor: Cursor): DigestStoreResult<void> {
+  const validationError = validateFetchedBatch(batch, cursor);
+  if (validationError) return fetchedMailError(validationError);
+
+  const current = readMailCursor(cursor.ownerId, cursor.mailboxId, cursor.folder);
+  const currentUid = current && current.uidValidity === cursor.uidValidity ? numericUid(current.lastUid) : undefined;
+  const nextUid = numericUid(cursor.lastUid)!;
+  if (currentUid !== undefined && nextUid < currentUid) return fetchedMailError("游标不能倒退");
+
+  const storedAt = new Date().toISOString();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const insert = db.prepare(
+      `INSERT OR IGNORE INTO fetched_mails (
+        ownerId, mailboxId, folder, uidValidity, uid, receivedAt, oversized, sizeBytes, rawBytes, storedAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (const mail of batch) {
+      insert.run(
+        mail.key.ownerId,
+        mail.key.mailboxId,
+        mail.key.folder,
+        mail.key.uidValidity,
+        mail.key.uid,
+        mail.receivedAt,
+        mail.oversized ? 1 : 0,
+        mail.sizeBytes,
+        mail.rawBytes ? Buffer.from(mail.rawBytes) : null,
+        storedAt
+      );
+    }
+    saveMailCursor({
+      ownerId: cursor.ownerId,
+      mailboxId: cursor.mailboxId,
+      folder: cursor.folder,
+      uidValidity: cursor.uidValidity,
+      lastUid: cursor.lastUid
+    });
+    db.exec("COMMIT");
+  } catch {
+    db.exec("ROLLBACK");
+    return { ok: false, error: { code: "STORAGE", retryable: true, message: "邮件状态保存失败" } };
+  }
+  publishAppEvent("mail-cursor", { mailboxId: cursor.mailboxId, folder: cursor.folder, lastUid: cursor.lastUid });
+  return { ok: true, value: undefined };
+}
+
+function rowToFetchedMail(row: SqlRow): RawMail {
+  const rawBytes = row.rawBytes instanceof Uint8Array ? new Uint8Array(row.rawBytes) : undefined;
+  return {
+    key: {
+      ownerId: String(row.ownerId),
+      mailboxId: String(row.mailboxId),
+      folder: String(row.folder),
+      uidValidity: String(row.uidValidity),
+      uid: String(row.uid)
+    },
+    receivedAt: String(row.receivedAt),
+    ...(rawBytes ? { rawBytes } : {}),
+    oversized: Number(row.oversized) === 1,
+    sizeBytes: Number(row.sizeBytes)
+  };
+}
+
+export function readFetchedMails(ownerId: string, mailboxId: string, folder: string, limit = 20) {
+  const cursor = readMailCursor(ownerId, mailboxId, folder);
+  if (!cursor) return [];
+  const safeLimit = Math.min(20, Math.max(1, Math.floor(limit)));
+  return (db.prepare(
+    `SELECT ownerId, mailboxId, folder, uidValidity, uid, receivedAt, oversized, sizeBytes, rawBytes
+     FROM fetched_mails
+     WHERE ownerId = ? AND mailboxId = ? AND folder = ? AND uidValidity = ?
+     ORDER BY CAST(uid AS INTEGER) ASC
+     LIMIT ?`
+  ).all(ownerId, mailboxId, folder, cursor.uidValidity, safeLimit) as SqlRow[]).map(rowToFetchedMail);
+}
+
 export function readProcessingRuns(limit = 100) {
   return clone(getRuns(limit));
 }
@@ -1084,6 +1217,7 @@ export function removeMailbox(id: string) {
   db.exec("BEGIN IMMEDIATE");
   try {
     db.prepare("DELETE FROM mail_cursors WHERE mailboxId = ?").run(id);
+    db.prepare("DELETE FROM fetched_mails WHERE mailboxId = ?").run(id);
     db.prepare("DELETE FROM emails WHERE mailboxId = ?").run(id);
     db.prepare("DELETE FROM mailboxes WHERE id = ?").run(id);
     db.exec("COMMIT");
