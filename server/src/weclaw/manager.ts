@@ -637,6 +637,9 @@ async function sendWeclawDirectItem(
 
   if (response.ret && response.ret !== 0) {
     const errorMessage = `send message failed: ret=${response.ret} errmsg=${response.errmsg || ""}`;
+    if (response.ret === sessionExpiredCode) {
+      appendLog("system", "notification bridge session expired; pending notifications are paused until the next WeChat message");
+    }
     recordStoredWeclawTokenSendResult(recipientId, contextToken, {
       at: new Date().toISOString(),
       success: false,

@@ -73,6 +73,10 @@ function shouldPause(error: unknown) {
     "not bound",
     "missing context_token",
     "ret=-2",
+    "ret=-14",
+    "session expired",
+    "会话失效",
+    "会话过期",
     "recipient",
     "未绑定",
     "接收人"

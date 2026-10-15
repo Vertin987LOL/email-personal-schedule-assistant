@@ -24,7 +24,8 @@ import {
 import { apiRateLimit, corsOrigin, csrfProtection, securityHeaders } from "./security";
 import {
   hasInterruptedRecoveryRetry,
-  markInterruptedRuns
+  markInterruptedRuns,
+  resumePausedNotificationDeliveries
 } from "./store";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -35,7 +36,10 @@ const port = Number(process.env.PORT ?? 8787);
 
 const app = express();
 
-setWeclawContextReadyHandler(() => schedulePendingEmailNotificationRetry(500));
+setWeclawContextReadyHandler(() => {
+  resumePausedNotificationDeliveries("wechat");
+  schedulePendingEmailNotificationRetry(500);
+});
 
 app.set("trust proxy", true);
 app.disable("x-powered-by");

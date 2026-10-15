@@ -186,6 +186,18 @@ test("permission and relationship failures pause only the affected channel", asy
   assert.equal(target.deliveries.find((item) => item.channel === "wechat")?.status, "sent");
 });
 
+test("WeChat session expiry pauses the delivery instead of retrying forever", async () => {
+  const target = createHarness({
+    wechatFailure: new Error("send message failed: ret=-14 errmsg=session expired")
+  });
+  target.dispatcher.enqueueEmailNotifications(email);
+  const result = await target.dispatcher.retryNotificationDeliveries();
+
+  assert.equal(result.paused, 1);
+  assert.equal(result.retried, 0);
+  assert.equal(target.deliveries.find((item) => item.channel === "wechat")?.status, "paused");
+});
+
 test("a missing email pauses an orphaned delivery instead of retrying forever", async () => {
   const target = createHarness();
   target.dispatcher.enqueueEmailNotifications({ ...email, id: "missing-email" });
