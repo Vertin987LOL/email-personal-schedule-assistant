@@ -44,7 +44,8 @@ import type {
   QqGatewayState,
   QqEmailReadAction,
   QqNotificationReference,
-  SystemSettings
+  SystemSettings,
+  MailCursor
 } from "./types";
 
 const DEFAULT_DATA_DIR = process.env.NODE_TEST_CONTEXT
@@ -172,6 +173,16 @@ db.exec(`
     createdAt TEXT NOT NULL,
     updatedAt TEXT NOT NULL,
     data TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS mail_cursors (
+    ownerId TEXT NOT NULL,
+    mailboxId TEXT NOT NULL,
+    folder TEXT NOT NULL,
+    uidValidity TEXT NOT NULL,
+    lastUid TEXT NOT NULL,
+    updatedAt TEXT NOT NULL,
+    PRIMARY KEY (ownerId, mailboxId, folder)
   );
 
   CREATE TABLE IF NOT EXISTS emails (
@@ -949,6 +960,45 @@ export function readMailboxes() {
   return clone(getAllMailboxes());
 }
 
+export function readMailCursor(ownerId: string, mailboxId: string, folder: string): MailCursor | undefined {
+  const row = db
+    .prepare(
+      `SELECT ownerId, mailboxId, folder, uidValidity, lastUid, updatedAt
+       FROM mail_cursors
+       WHERE ownerId = ? AND mailboxId = ? AND folder = ?`
+    )
+    .get(ownerId, mailboxId, folder) as Partial<MailCursor> | undefined;
+  if (!row) return undefined;
+  return {
+    ownerId: String(row.ownerId),
+    mailboxId: String(row.mailboxId),
+    folder: String(row.folder),
+    uidValidity: String(row.uidValidity),
+    lastUid: String(row.lastUid),
+    updatedAt: String(row.updatedAt)
+  };
+}
+
+export function saveMailCursor(cursor: Omit<MailCursor, "updatedAt">): MailCursor {
+  const saved = { ...cursor, updatedAt: new Date().toISOString() };
+  db.prepare(
+    `INSERT INTO mail_cursors (ownerId, mailboxId, folder, uidValidity, lastUid, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (ownerId, mailboxId, folder) DO UPDATE SET
+       uidValidity = excluded.uidValidity,
+       lastUid = excluded.lastUid,
+       updatedAt = excluded.updatedAt`
+  ).run(
+    saved.ownerId,
+    saved.mailboxId,
+    saved.folder,
+    saved.uidValidity,
+    saved.lastUid,
+    saved.updatedAt
+  );
+  return saved;
+}
+
 export function readProcessingRuns(limit = 100) {
   return clone(getRuns(limit));
 }
@@ -1033,6 +1083,7 @@ export function upsertMailbox(input: Omit<Mailbox, "id" | "createdAt" | "updated
 export function removeMailbox(id: string) {
   db.exec("BEGIN IMMEDIATE");
   try {
+    db.prepare("DELETE FROM mail_cursors WHERE mailboxId = ?").run(id);
     db.prepare("DELETE FROM emails WHERE mailboxId = ?").run(id);
     db.prepare("DELETE FROM mailboxes WHERE id = ?").run(id);
     db.exec("COMMIT");

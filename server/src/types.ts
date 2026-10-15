@@ -321,6 +321,15 @@ export type Mailbox = {
   lastError?: string;
 };
 
+export type MailCursor = {
+  ownerId: string;
+  mailboxId: string;
+  folder: string;
+  uidValidity: string;
+  lastUid: string;
+  updatedAt: string;
+};
+
 export type ProcessedEmail = {
   id: string;
   mailboxId: string;

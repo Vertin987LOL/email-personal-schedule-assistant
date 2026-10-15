@@ -7,7 +7,10 @@ export type FetchedEmail = {
   markRead: () => Promise<{ marked: boolean; note?: string }>;
 };
 
-export function createImapClient(mailbox: Mailbox, overrides: Partial<ImapFlowOptions> = {}) {
+export function createImapClient(
+  mailbox: Pick<Mailbox, "host" | "port" | "secure" | "username" | "password">,
+  overrides: Partial<ImapFlowOptions> = {}
+) {
   const client = new ImapFlow({
     host: mailbox.host,
     port: mailbox.port,

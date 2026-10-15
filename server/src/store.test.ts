@@ -24,6 +24,7 @@ const {
   queryNotificationDeliveries,
   recordQqNotificationReference,
   readMailboxes,
+  readMailCursor,
   readProcessingRuns,
   readQqBotBindings,
   readQqBotConfig,
@@ -52,6 +53,8 @@ const {
   queryAiUsageDashboard,
   recordAiUsageEvent,
   saveAiCostSnapshot,
+  saveMailCursor,
+  updateState,
   undoProcessedEmailsPanelRead
 } = await import("./store");
 
@@ -754,6 +757,33 @@ test("resuming paused deliveries affects only the selected channel", () => {
   assert.equal(resumePausedNotificationDeliveries("qq"), 1);
   assert.equal(listNotificationDeliveries({ emailId: "resume-email" }).find((item) => item.channel === "qq")?.status, "retry");
   assert.equal(listNotificationDeliveries({ emailId: "resume-email" }).find((item) => item.channel === "wechat")?.status, "paused");
+});
+
+test("mail cursors persist with owner and mailbox scope", () => {
+  const saved = saveMailCursor({
+    ownerId: "owner-a",
+    mailboxId: "mailbox-a",
+    folder: "INBOX",
+    uidValidity: "42",
+    lastUid: "17"
+  });
+  const loaded = readMailCursor("owner-a", "mailbox-a", "INBOX");
+  assert.equal(loaded?.uidValidity, "42");
+  assert.equal(loaded?.lastUid, "17");
+  assert.equal(readMailCursor("owner-b", "mailbox-a", "INBOX"), undefined);
+
+  const updated = saveMailCursor({
+    ownerId: "owner-a",
+    mailboxId: "mailbox-a",
+    folder: "INBOX",
+    uidValidity: "42",
+    lastUid: "18"
+  });
+  assert.equal(updated.lastUid, "18");
+  assert.equal(readMailCursor("owner-a", "mailbox-a", "INBOX")?.lastUid, "18");
+
+  updateState(() => {});
+  assert.equal(readMailCursor("owner-a", "mailbox-a", "INBOX")?.lastUid, "18");
 });
 test("notification delivery claims are exclusive and stale sends recover", () => {
   const sqlite = new DatabaseSync(path.join(process.env.DATA_DIR!, "app.sqlite"));
