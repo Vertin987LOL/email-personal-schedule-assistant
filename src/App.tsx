@@ -65,6 +65,7 @@ import type {
   SystemSettings,
   WeclawStatus
 } from "./types";
+import { extractWeclawQrUrl, shouldShowWeclawQr } from "./weclaw-ui";
 
 type View = "mail" | "notifications" | "usage" | "settings";
 type NotificationQueueStatus = NotificationDeliveryStatus | "failed";
@@ -171,19 +172,6 @@ function notificationCategorySummary(categories: Record<MailCategory, boolean>) 
   const active = notificationCategoryOrder.filter((category) => categories[category]);
   if (!active.length) return "未选择分类";
   return active.map((category) => categoryMeta[category].label).join("、");
-}
-
-function extractWeclawQrUrl(logTail: string) {
-  const lastStart = logTail.lastIndexOf("starting ");
-  const lastStop = Math.max(
-    logTail.lastIndexOf("stopping managed weclaw process"),
-    logTail.lastIndexOf("weclaw exited")
-  );
-  if (lastStop > lastStart) return "";
-
-  const activeLog = lastStart >= 0 ? logTail.slice(lastStart) : logTail;
-  const matches = [...activeLog.matchAll(/QR URL:\s*(https?:\/\/\S+)/g)];
-  return matches.length ? matches[matches.length - 1][1] : "";
 }
 
 const emptyMailbox: Partial<Mailbox> = {
@@ -2413,7 +2401,13 @@ function SettingsPanel({
   useEffect(() => {
     let cancelled = false;
 
-    if (!weclawQrUrl || weclawStatus?.apiReachable) {
+    if (
+      !shouldShowWeclawQr({
+        qrUrl: weclawQrUrl,
+        hasCredentials: weclawLoginSaved,
+        managedRunning: Boolean(weclawStatus?.managedRunning)
+      })
+    ) {
       setWeclawQrDataUrl("");
       return () => {
         cancelled = true;
