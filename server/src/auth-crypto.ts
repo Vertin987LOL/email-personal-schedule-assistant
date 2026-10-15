@@ -38,6 +38,10 @@ export function verifyPassword(password: string, settings: AuthSettings) {
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
+export function isDefaultPassword(settings: AuthSettings) {
+  return verifyPassword(DEFAULT_PASSWORD, settings);
+}
+
 function signingKey(settings: AuthSettings) {
   return `${settings.passwordHash}.${settings.passwordSalt}.${settings.passwordIterations}`;
 }

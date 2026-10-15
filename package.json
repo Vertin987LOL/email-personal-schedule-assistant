@@ -8,7 +8,7 @@
     "dev:api": "tsx watch server/src/server.ts",
     "dev:web": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
-    "start": "bash scripts/service-supervisor.sh",
+    "start": "node scripts/service-supervisor.mjs",
     "start:app": "node --import tsx server/src/server.ts"
   },
   "dependencies": {

@@ -60,7 +60,7 @@ app.get(/.*/, (_req, res) => {
   res.sendFile(path.join(distDir, "index.html"));
 });
 
-const httpServer = app.listen(port, () => {
+const httpServer = app.listen(port, "127.0.0.1", () => {
   const retryInterruptedRecovery = hasInterruptedRecoveryRetry();
   const interruptedCount = markInterruptedRuns();
   startProcessingWorker({ recoverInterruptedOnFirstRun: interruptedCount > 0 || retryInterruptedRecovery });

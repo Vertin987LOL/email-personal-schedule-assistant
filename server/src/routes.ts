@@ -16,6 +16,7 @@ import {
   getDashboardData,
   getEmailNotificationSummary,
   getProcessedEmailById,
+  isAdminPasswordChanged,
   markProcessedEmailsPanelRead,
   pauseNotificationDelivery,
   publicAiBillingSettings,
@@ -84,6 +85,14 @@ import type {
 
 const router = express.Router();
 const EMAIL_ASSET_TOKEN_TTL_SECONDS = 6 * 60 * 60;
+
+function requireChangedAdminPassword(_req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!isAdminPasswordChanged()) {
+    res.status(428).json({ error: "请先修改默认管理员密码，再保存邮箱、模型或通知凭证。" });
+    return;
+  }
+  next();
+}
 
 const mailboxSchema = z.object({
   id: z.string().optional(),
@@ -626,6 +635,7 @@ router.get(
 
 router.put(
   "/settings/ai",
+  requireChangedAdminPassword,
   asyncRoute((req, res) => {
     const parsed = aiSchema.parse(req.body);
     res.json(publicAiSettings(updateAiSettings(parsed)));
@@ -634,6 +644,7 @@ router.put(
 
 router.post(
   "/settings/ai/test",
+  requireChangedAdminPassword,
   asyncRoute(async (req, res) => {
     const parsed = aiSchema.parse(req.body);
     const saved = readSettings().ai;
@@ -709,6 +720,7 @@ router.get(
 
 router.put(
   "/settings/notification",
+  requireChangedAdminPassword,
   asyncRoute(async (req, res) => {
     const isChannelPayload = Boolean(
       req.body &&
@@ -844,6 +856,7 @@ router.get(
 
 router.post(
   "/mailboxes",
+  requireChangedAdminPassword,
   asyncRoute((req, res) => {
     const parsed = mailboxSchema.parse(req.body);
     res.status(201).json(upsertMailbox(parsed).map(publicMailbox));
@@ -852,6 +865,7 @@ router.post(
 
 router.put(
   "/mailboxes/:id",
+  requireChangedAdminPassword,
   asyncRoute((req, res) => {
     const parsed = mailboxSchema.parse({ ...req.body, id: req.params.id });
     res.json(upsertMailbox(parsed).map(publicMailbox));

@@ -3,7 +3,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { createAuthSettings, verifyPassword } from "./auth-crypto";
+import { createAuthSettings, isDefaultPassword, verifyPassword } from "./auth-crypto";
 import { decryptCredential, encryptCredential } from "./credential-crypto";
 import { publishAppEvent } from "./events";
 import type {
@@ -1090,6 +1090,10 @@ export function updateNotificationSettings(input: Partial<NotificationSettings>)
 
 export function verifyAdminPassword(password: string) {
   return verifyPassword(password, getSettings().auth);
+}
+
+export function isAdminPasswordChanged() {
+  return !isDefaultPassword(getSettings().auth);
 }
 
 export function updateAuthPassword(currentPassword: string, newPassword: string) {
