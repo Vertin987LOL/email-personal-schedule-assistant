@@ -10,7 +10,8 @@ const nodeArgs = [
   "tsx",
   "server/src/server.ts"
 ];
-const healthUrl = process.env.APP_HEALTH_URL ?? "http://127.0.0.1:8787/api/health";
+const servicePort = process.env.PORT ?? "8787";
+const healthUrl = process.env.APP_HEALTH_URL ?? `http://127.0.0.1:${servicePort}/api/health`;
 const healthIntervalMs = Number(process.env.APP_HEALTH_INTERVAL_SECONDS ?? 30) * 1000;
 const healthFailureLimit = Number(process.env.APP_HEALTH_FAILURE_LIMIT ?? 3);
 const startupGraceMs = Number(process.env.APP_HEALTH_STARTUP_GRACE_SECONDS ?? 45) * 1000;
