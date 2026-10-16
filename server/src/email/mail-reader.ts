@@ -205,7 +205,9 @@ export class ImapMailReader implements MailReader {
       const items: RawMail[] = [];
       for (const uid of uids) {
         const message = metadata.get(uid);
-        if (!message) continue;
+        // A partial FETCH must never move the cursor past an unarchived UID.
+        // If the message was deleted concurrently, the next SEARCH omits it.
+        if (!message) throw new Error(`邮件 UID ${uid} 的元信息读取失败`);
         const sizeBytes = Number(message.size ?? 0);
         const key = {
           ownerId: config.ownerId,

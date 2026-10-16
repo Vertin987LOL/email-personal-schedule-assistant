@@ -79,6 +79,7 @@ const qqSettings: QqBotConfig = {
 };
 
 function createHarness(options: {
+  email?: ProcessedEmail;
   wechat?: NotificationSettings;
   qq?: QqBotConfig;
   qqFailure?: Error;
@@ -93,15 +94,16 @@ function createHarness(options: {
       wechat: options.wechat ?? wechatSettings,
       qq: options.qq ?? qqSettings
     }),
-    readEmail: (id) => (id === email.id ? email : undefined),
+    readEmail: (id) => (id === (options.email ?? email).id ? options.email ?? email : undefined),
     readMailbox: (id) => (id === mailbox.id ? mailbox : undefined),
-    enqueueDelivery: (emailId, channel) => {
+    enqueueDelivery: (emailId, channel, options = {}) => {
       const existing = deliveries.find((item) => item.emailId === emailId && item.channel === channel);
       if (existing) return existing;
       const created: NotificationDelivery = {
         id: `delivery-${++sequence}`,
         emailId,
         channel,
+        bypassCategoryFilter: options.bypassCategoryFilter,
         status: "pending",
         attemptCount: 0,
         nextAttemptAt: new Date(now()).toISOString(),
@@ -157,6 +159,17 @@ test("category settings independently control channel eligibility", () => {
   });
   target.dispatcher.enqueueEmailNotifications(email);
   assert.deepEqual(target.deliveries.map((item) => item.channel), ["wechat"]);
+});
+
+test("IMAP ingestion can enqueue every category without changing channel settings", async () => {
+  const ignoredEmail = { ...email, category: "ignore" as const };
+  const target = createHarness({ email: ignoredEmail });
+  target.dispatcher.enqueueEmailNotifications(ignoredEmail, { bypassCategoryFilter: true });
+
+  assert.deepEqual(target.deliveries.map((item) => item.channel).sort(), ["qq", "wechat"]);
+  const result = await target.dispatcher.retryNotificationDeliveries();
+  assert.deepEqual(result, { attempted: 2, sent: 2, retried: 0, paused: 0, skipped: false });
+  assert.equal(target.deliveries.every((item) => item.status === "sent"), true);
 });
 
 test("one channel can succeed while the other schedules an isolated retry", async () => {

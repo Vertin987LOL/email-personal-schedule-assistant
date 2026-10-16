@@ -108,6 +108,10 @@ export type NotificationDelivery = {
   id: string;
   emailId: string;
   channel: NotificationChannel;
+  // M0 mail ingestion must enqueue every classified email. This flag keeps
+  // that per-delivery decision durable without changing the user's channel
+  // settings or the legacy default filtering behavior.
+  bypassCategoryFilter?: boolean;
   status: NotificationDeliveryStatus;
   attemptCount: number;
   nextAttemptAt?: string;

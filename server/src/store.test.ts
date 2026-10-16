@@ -26,6 +26,7 @@ const {
   readMailboxes,
   readMailCursor,
   readFetchedMails,
+  readPendingFetchedMails,
   readProcessingRuns,
   readQqBotBindings,
   readQqBotConfig,
@@ -56,6 +57,9 @@ const {
   saveAiCostSnapshot,
   saveMailCursor,
   commitFetched,
+  commitProcessedEmailWithNotifications,
+  fetchedMailExternalUid,
+  getProcessedEmailById,
   updateState,
   undoProcessedEmailsPanelRead
 } = await import("./store");
@@ -846,6 +850,57 @@ test("commitFetched rejects an incomplete batch without moving cursor or storing
   assert.equal(readMailCursor("owner-e", "mailbox-e", "INBOX"), undefined);
   assert.equal(readFetchedMails("owner-e", "mailbox-e", "INBOX").length, 0);
 });
+
+test("pending fetched mails exclude only the exact compound UID already processed", () => {
+  const suffix = `${process.pid}-${Date.now()}`;
+  const ownerId = `pending-owner-${suffix}`;
+  const mailboxId = `pending-mailbox-${suffix}`;
+  const key1 = { ownerId, mailboxId, folder: "INBOX", uidValidity: "31", uid: "1" };
+  const key2 = { ...key1, uid: "2" };
+  const raw = (key: typeof key1) => ({
+    key,
+    receivedAt: "2026-10-16T00:00:00.000Z",
+    rawBytes: new Uint8Array(Buffer.from(`Subject: ${key.uid}\r\n\r\nbody`)),
+    oversized: false,
+    sizeBytes: 20
+  });
+  assert.equal(commitFetched([raw(key1), raw(key2)], { ...key2, lastUid: key2.uid }).ok, true);
+  assert.deepEqual(
+    readPendingFetchedMails(ownerId, mailboxId, "INBOX").map((mail) => mail.key.uid),
+    ["1", "2"]
+  );
+
+  const processed = makeStoreEmail({ id: `pending-processed-${suffix}`, mailboxId });
+  processed.externalUid = fetchedMailExternalUid(key1);
+  assert.ok(addProcessedEmail(processed));
+  assert.deepEqual(
+    readPendingFetchedMails(ownerId, mailboxId, "INBOX").map((mail) => mail.key.uid),
+    ["2"]
+  );
+});
+
+test("processed email and notification enqueue roll back together", () => {
+  const suffix = `${process.pid}-${Date.now()}`;
+  const email = makeStoreEmail({ id: `atomic-email-${suffix}`, mailboxId: `atomic-mailbox-${suffix}` });
+  email.externalUid = JSON.stringify(["local-owner", "INBOX", "41", "9"]);
+
+  assert.throws(() => {
+    commitProcessedEmailWithNotifications(email, () => {
+      enqueueNotificationDelivery(email.id, "qq");
+      throw new Error("synthetic enqueue failure");
+    });
+  }, /synthetic enqueue failure/);
+  assert.equal(getProcessedEmailById(email.id), undefined);
+  assert.equal(listNotificationDeliveries({ emailId: email.id }).length, 0);
+
+  const inserted = commitProcessedEmailWithNotifications(email, () => {
+    enqueueNotificationDelivery(email.id, "qq");
+    return 1;
+  });
+  assert.equal(inserted?.externalUid, email.externalUid);
+  assert.equal(listNotificationDeliveries({ emailId: email.id }).length, 1);
+});
+
 test("notification delivery claims are exclusive and stale sends recover", () => {
   const sqlite = new DatabaseSync(path.join(process.env.DATA_DIR!, "app.sqlite"));
   sqlite.prepare("DELETE FROM notification_deliveries").run();

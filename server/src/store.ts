@@ -6,7 +6,7 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { createAuthSettings, isDefaultPassword, verifyPassword } from "./auth-crypto";
 import { decryptCredential, encryptCredential } from "./credential-crypto";
 import { publishAppEvent } from "./events";
-import type { Cursor, RawMail } from "./email/mail-reader";
+import type { Cursor, MailKey, RawMail } from "./email/mail-reader";
 import type {
   AiSettings,
   AiBillingProvider,
@@ -55,7 +55,7 @@ const DEFAULT_DATA_DIR = process.env.NODE_TEST_CONTEXT
 const DATA_DIR = path.resolve(process.env.DATA_DIR ?? DEFAULT_DATA_DIR);
 const JSON_DATA_FILE = path.join(DATA_DIR, "app.db.json");
 const SQLITE_FILE = path.join(DATA_DIR, "app.sqlite");
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const PANEL_READ_UNDO_TTL_MS = 10_000;
 const EMAIL_DISPLAY_RECEIVED_ORDER_SQL = "COALESCE(receivedAt, processedAt) DESC, processedAt DESC, id DESC";
 const EMAIL_QUEUE_RECEIVED_ORDER_SQL = "COALESCE(receivedAt, processedAt) ASC, processedAt ASC, id ASC";
@@ -155,6 +155,12 @@ type SqlRow = Record<string, unknown>;
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const db = new DatabaseSync(SQLITE_FILE);
+
+// Calendar composition uses the same local database through its restricted
+// application router.
+export function getAppDatabase(): DatabaseSync {
+  return db;
+}
 db.exec(`
   PRAGMA journal_mode = WAL;
   PRAGMA synchronous = NORMAL;
@@ -293,6 +299,7 @@ db.exec(`
     id TEXT PRIMARY KEY,
     emailId TEXT NOT NULL,
     channel TEXT NOT NULL,
+    bypassCategoryFilter INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
     attemptCount INTEGER NOT NULL DEFAULT 0,
     nextAttemptAt TEXT,
@@ -808,6 +815,15 @@ function ensureInitialized() {
 
 ensureInitialized();
 
+function ensureNotificationDeliveryColumns() {
+  const columns = db.prepare("PRAGMA table_info(notification_deliveries)").all() as SqlRow[];
+  if (!columns.some((column) => String(column.name) === "bypassCategoryFilter")) {
+    db.exec("ALTER TABLE notification_deliveries ADD COLUMN bypassCategoryFilter INTEGER NOT NULL DEFAULT 0");
+  }
+}
+
+ensureNotificationDeliveryColumns();
+
 function migrateQqNotificationState() {
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -1132,6 +1148,31 @@ export function readFetchedMails(ownerId: string, mailboxId: string, folder: str
   ).all(ownerId, mailboxId, folder, cursor.uidValidity, safeLimit) as SqlRow[]).map(rowToFetchedMail);
 }
 
+// Include owner and UID generation: IMAP UIDs are only unique within one
+// folder and UIDVALIDITY generation, and the legacy emails table has no owner.
+export function fetchedMailExternalUid(key: MailKey): string {
+  return JSON.stringify([key.ownerId, key.folder, key.uidValidity, key.uid]);
+}
+
+export function readPendingFetchedMails(ownerId: string, mailboxId: string, folder: string, limit = 20): RawMail[] {
+  const cursor = readMailCursor(ownerId, mailboxId, folder);
+  if (!cursor) return [];
+  const safeLimit = Number.isFinite(limit) ? Math.min(20, Math.max(1, Math.floor(limit))) : 20;
+  return (db.prepare(
+    `SELECT f.ownerId, f.mailboxId, f.folder, f.uidValidity, f.uid,
+            f.receivedAt, f.oversized, f.sizeBytes, f.rawBytes
+     FROM fetched_mails AS f
+     WHERE f.ownerId = ? AND f.mailboxId = ? AND f.folder = ? AND f.uidValidity = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM emails AS e
+         WHERE e.mailboxId = f.mailboxId
+           AND e.externalUid = json_array(f.ownerId, f.folder, f.uidValidity, f.uid)
+       )
+     ORDER BY CAST(f.uid AS INTEGER) ASC
+     LIMIT ?`
+  ).all(ownerId, mailboxId, folder, cursor.uidValidity, safeLimit) as SqlRow[]).map(rowToFetchedMail);
+}
+
 export function readProcessingRuns(limit = 100) {
   return clone(getRuns(limit));
 }
@@ -1356,6 +1397,38 @@ export function addProcessedEmail(email: ProcessedEmail) {
     ...email,
     panelRead: email.panelRead ?? email.category === "ignore"
   });
+}
+
+// The new UID-based pipeline treats each fetched message as distinct, even if
+// Message-ID or content matches another message. Its notification writes must
+// commit together with the processed email, or both remain pending for replay.
+export function commitProcessedEmailWithNotifications(
+  email: ProcessedEmail,
+  enqueue: () => number
+): ProcessedEmail | undefined {
+  db.exec("BEGIN IMMEDIATE");
+  let inserted: ProcessedEmail | undefined;
+  try {
+    const existing = db.prepare(
+      "SELECT 1 FROM emails WHERE mailboxId = ? AND externalUid = ? LIMIT 1"
+    ).get(email.mailboxId, email.externalUid);
+    if (existing) {
+      db.exec("COMMIT");
+      return undefined;
+    }
+    if (db.prepare("SELECT 1 FROM emails WHERE id = ? LIMIT 1").get(email.id)) {
+      throw new Error("processed email ID already belongs to another message");
+    }
+    insertEmail(email);
+    enqueue();
+    db.exec("COMMIT");
+    inserted = clone({ ...email, panelRead: email.panelRead ?? email.category === "ignore" });
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  publishAppEvent("email", { id: email.id, mailboxId: email.mailboxId, category: email.category });
+  return inserted;
 }
 
 function updateEmailByLookup(mailboxId: string, externalUid: string, mutator: (email: ProcessedEmail) => void) {
@@ -1956,6 +2029,7 @@ function rowToNotificationDelivery(row: SqlRow): NotificationDelivery {
     id: String(row.id),
     emailId: String(row.emailId),
     channel: String(row.channel) as NotificationChannel,
+    bypassCategoryFilter: Number(row.bypassCategoryFilter ?? 0) === 1,
     status: String(row.status) as NotificationDeliveryStatus,
     attemptCount: Number(row.attemptCount),
     nextAttemptAt: row.nextAttemptAt ? String(row.nextAttemptAt) : undefined,
@@ -2625,13 +2699,22 @@ function publishNotificationDeliveryStatus(channel: NotificationChannel, status:
   });
 }
 
-export function enqueueNotificationDelivery(emailId: string, channel: NotificationChannel): NotificationDelivery {
+export function enqueueNotificationDelivery(
+  emailId: string,
+  channel: NotificationChannel,
+  options: { bypassCategoryFilter?: boolean } = {}
+): NotificationDelivery {
   const now = new Date().toISOString();
   db.prepare(
     `INSERT OR IGNORE INTO notification_deliveries (
-      id, emailId, channel, status, attemptCount, nextAttemptAt, createdAt, updatedAt
-    ) VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)`
-  ).run(randomUUID(), emailId, channel, now, now, now);
+      id, emailId, channel, bypassCategoryFilter, status, attemptCount, nextAttemptAt, createdAt, updatedAt
+    ) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?)`
+  ).run(randomUUID(), emailId, channel, options.bypassCategoryFilter ? 1 : 0, now, now, now);
+  if (options.bypassCategoryFilter) {
+    db.prepare(
+      "UPDATE notification_deliveries SET bypassCategoryFilter = 1, updatedAt = ? WHERE emailId = ? AND channel = ?"
+    ).run(now, emailId, channel);
+  }
   const delivery = getNotificationDelivery(emailId, channel)!;
   publishNotificationDeliveryStatus(channel, delivery.status);
   return delivery;

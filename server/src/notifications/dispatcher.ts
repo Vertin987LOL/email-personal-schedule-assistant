@@ -42,7 +42,11 @@ export type NotificationDispatcherDependencies = {
   readChannelSettings?: () => ChannelSettings;
   readEmail?: (id: string) => ProcessedEmail | undefined;
   readMailbox?: (id: string) => Mailbox | undefined;
-  enqueueDelivery?: (emailId: string, channel: NotificationChannel) => NotificationDelivery;
+  enqueueDelivery?: (
+    emailId: string,
+    channel: NotificationChannel,
+    options?: { bypassCategoryFilter?: boolean }
+  ) => NotificationDelivery;
   claimDeliveries?: (limit: number, now?: string) => NotificationDelivery[];
   updateDelivery?: (id: string, patch: DeliveryPatch) => NotificationDelivery | undefined;
   sendWechat?: (model: EmailNotificationModel, settings: NotificationSettings) => Promise<unknown>;
@@ -123,13 +127,14 @@ export class NotificationDispatcher {
     };
   }
 
-  enqueueEmailNotifications(email: ProcessedEmail) {
+  enqueueEmailNotifications(email: ProcessedEmail, options: { bypassCategoryFilter?: boolean } = {}) {
     const settings = this.dependencies.readChannelSettings();
     const created: NotificationDelivery[] = [];
     for (const channel of ["wechat", "qq"] as const) {
       const channelSettings = settings[channel];
-      if (!channelSettings.enabled || !channelSettings.notifyCategories[email.category]) continue;
-      created.push(this.dependencies.enqueueDelivery(email.id, channel));
+      if (!channelSettings.enabled) continue;
+      if (!options.bypassCategoryFilter && !channelSettings.notifyCategories[email.category]) continue;
+      created.push(this.dependencies.enqueueDelivery(email.id, channel, options));
     }
     return created;
   }
@@ -157,7 +162,7 @@ export class NotificationDispatcher {
       return;
     }
     const settings = this.dependencies.readChannelSettings()[delivery.channel];
-    if (!settings.enabled || !settings.notifyCategories[email.category]) {
+    if (!settings.enabled || (!delivery.bypassCategoryFilter && !settings.notifyCategories[email.category])) {
       this.pause(delivery, "channel_or_category_disabled");
       result.paused += 1;
       return;
@@ -218,8 +223,8 @@ export function getNotificationDispatcher() {
   return dispatcher;
 }
 
-export function enqueueEmailNotifications(email: ProcessedEmail) {
-  return getNotificationDispatcher().enqueueEmailNotifications(email);
+export function enqueueEmailNotifications(email: ProcessedEmail, options: { bypassCategoryFilter?: boolean } = {}) {
+  return getNotificationDispatcher().enqueueEmailNotifications(email, options);
 }
 
 export function scheduleNotificationDispatch(delayMs = 0) {

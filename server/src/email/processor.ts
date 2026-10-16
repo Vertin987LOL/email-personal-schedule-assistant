@@ -9,20 +9,47 @@ import {
 import {
   addProcessedEmail,
   addRun,
+  commitFetched,
+  commitProcessedEmailWithNotifications,
+  fetchedMailExternalUid,
   findProcessedEmailDuplicate,
-  getMaxProcessedUid,
   getProcessedEmail,
+  readMailCursor,
+  readPendingFetchedMails,
   recordProcessingEvent,
   readMailboxes,
   readSettings,
+  saveMailCursor,
   updateMailboxSync,
   updateProcessedEmailReadMark,
   updateRun
 } from "../store";
 import { enqueueEmailNotifications, scheduleNotificationDispatch } from "../notifications/dispatcher";
-import type { Mailbox, ProcessingRun } from "../types";
-import { countUnreadImap, fetchInterruptedImapRecovery, fetchUnreadImap, type FetchedEmail } from "./imap";
+import type { Mailbox, ProcessedEmail, ProcessingRun } from "../types";
+import { countUnreadImap, type FetchedEmail } from "./imap";
+import { MimeMailParser, type MailParser } from "./mail-parser";
+import {
+  ImapMailReader,
+  baselineCursor as makeBaselineCursor,
+  type Cursor,
+  type MailReader,
+  type MailboxConfig,
+  type RawMail
+} from "./mail-reader";
+import { AiSummarizer, RetryingSummarizer, type Summarizer } from "./summarizer";
 import { countUnreadPop3, fetchUnreadPop3 } from "./pop3";
+
+const LOCAL_OWNER_ID = "local-owner";
+const incrementalImapReader = new ImapMailReader();
+const incrementalMailParser = new MimeMailParser();
+const incrementalSummarizer = new RetryingSummarizer(new AiSummarizer());
+
+export type ProcessorDependencies = {
+  imapReader?: MailReader;
+  imapParser?: MailParser;
+  imapSummarizer?: Summarizer;
+  countUnreadImap?: typeof countUnreadImap;
+};
 
 let running = false;
 const queuedMailboxIds = new Set<string>();
@@ -65,16 +92,47 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
   }
 }
 
-async function fetchForMailbox(mailbox: Mailbox, limit: number) {
-  if (mailbox.protocol === "imap") {
-    return fetchUnreadImap(mailbox, limit);
+function imapConfigFor(mailbox: Mailbox): MailboxConfig {
+  return {
+    ownerId: LOCAL_OWNER_ID,
+    mailboxId: mailbox.id,
+    folder: mailbox.folder || "INBOX",
+    host: mailbox.host,
+    port: mailbox.port,
+    secure: mailbox.secure,
+    username: mailbox.username,
+    password: mailbox.password
+  };
+}
+
+async function fetchIncrementalImap(
+  mailbox: Mailbox,
+  limit: number,
+  reader: MailReader = incrementalImapReader
+): Promise<void> {
+  const config = imapConfigFor(mailbox);
+  let cursor: Cursor | undefined = readMailCursor(config.ownerId, config.mailboxId, config.folder);
+  if (!cursor) {
+    const probed = await reader.probe(config);
+    if (!probed.ok) throw new Error(probed.error.message);
+    cursor = makeBaselineCursor(config, probed.value);
+    saveMailCursor(cursor);
+    return;
   }
+
+  const fetched = await reader.fetchAfter(config, cursor, Math.min(limit, 20));
+  if (!fetched.ok) throw new Error(fetched.error.message);
+  const committed = commitFetched(fetched.value.items, fetched.value.nextCursor);
+  if (!committed.ok) throw new Error(committed.error.message);
+}
+
+async function fetchForMailbox(mailbox: Mailbox, limit: number) {
   return fetchUnreadPop3(mailbox, limit);
 }
 
-async function countForMailbox(mailbox: Mailbox, limit: number) {
+async function countForMailbox(mailbox: Mailbox, limit: number, imapCounter = countUnreadImap) {
   if (mailbox.protocol === "imap") {
-    return countUnreadImap(mailbox, limit);
+    return imapCounter(mailbox, limit);
   }
   return countUnreadPop3(mailbox, limit);
 }
@@ -84,6 +142,7 @@ export async function processMailboxes(options: {
   manual?: boolean;
   recoverInterrupted?: boolean;
   suppressNotificationDispatch?: boolean;
+  dependencies?: ProcessorDependencies;
 } = {}) {
   if (running) {
     throw new Error("已有处理任务正在运行");
@@ -91,6 +150,10 @@ export async function processMailboxes(options: {
 
   running = true;
   const state = { settings: readSettings(), mailboxes: readMailboxes() };
+  const dependencies = options.dependencies ?? {};
+  const imapReader = dependencies.imapReader ?? incrementalImapReader;
+  const imapParser = dependencies.imapParser ?? incrementalMailParser;
+  const imapSummarizer = dependencies.imapSummarizer ?? incrementalSummarizer;
   const run: ProcessingRun = {
     id: randomUUID(),
     startedAt: new Date().toISOString(),
@@ -128,6 +191,70 @@ export async function processMailboxes(options: {
 
     const unreadCountByMailbox = new Map<string, number>();
     persistRun(run, { currentStage: "正在统计本轮未读邮件" });
+    const processIncrementalImapItem = async (mailbox: Mailbox, raw: RawMail) => {
+      const parsed = await imapParser.parse(raw);
+      if (!parsed.ok) {
+        run.errors.push(`${mailbox.name}: ${parsed.error.message}`);
+        persistRun(run, { currentStage: parsed.error.message });
+        return;
+      }
+
+      const normalized = parsed.value;
+      const summarized = await imapSummarizer.summarize(normalized, state.settings.ai);
+      if (!summarized.ok) {
+        run.errors.push(`${mailbox.name}: ${summarized.error.message}`);
+        persistRun(run, { currentStage: summarized.error.message });
+        return;
+      }
+
+      const summary = summarized.value;
+      const category = summary.category ?? "secondary";
+      const processedEmail: ProcessedEmail = {
+        id: randomUUID(),
+        mailboxId: mailbox.id,
+        externalUid: fetchedMailExternalUid(raw.key),
+        messageId: normalized.sourceMessageId,
+        subject: normalized.subject,
+        fromAddress: normalized.from || undefined,
+        receivedAt: normalized.receivedAt,
+        processedAt: new Date().toISOString(),
+        category,
+        summaryZh: summary.explanationZh,
+        reasonZh: summary.reasonZh ?? (summary.status === "fallback" ? "模型摘要未成功，已保留原邮件。" : ""),
+        actionItemsZh: summary.actionItemsZh ?? [],
+        originalText: normalized.bodyText,
+        rawSource: raw.rawBytes ? Buffer.from(raw.rawBytes).toString("utf8") : undefined,
+        attachments: normalized.attachmentNames.map((filename, attachmentIndex) => ({
+          id: `attachment-${attachmentIndex + 1}`,
+          filename,
+          contentType: "application/octet-stream",
+          size: 0,
+          related: false,
+          supportedForVision: false
+        })),
+        panelRead: category === "ignore",
+        panelReadAt: category === "ignore" ? new Date().toISOString() : undefined,
+        readMarked: false
+      };
+
+      let createdNotifications = 0;
+      const inserted = commitProcessedEmailWithNotifications(processedEmail, () => {
+        const notices = enqueueEmailNotifications(processedEmail, { bypassCategoryFilter: true });
+        createdNotifications = notices.length;
+        return createdNotifications;
+      });
+      if (!inserted) return;
+
+      enqueuedNotificationCount += createdNotifications;
+      incrementRun(run, category);
+      persistRun(run, {
+        currentStage: summary.status === "fallback" ? "fallback summary stored" : "email summary stored",
+        currentEmailStep: "complete",
+        currentEmailStepIndex: 4,
+        currentEmailStepTotal: 4
+      });
+    };
+
     for (const [index, mailbox] of mailboxes.entries()) {
       try {
         persistRun(run, {
@@ -136,7 +263,7 @@ export async function processMailboxes(options: {
           currentStage: "正在统计本轮未读邮件"
         });
         const count = await withTimeout(
-          countForMailbox(mailbox, state.settings.system.processLimitPerMailbox),
+          countForMailbox(mailbox, state.settings.system.processLimitPerMailbox, dependencies.countUnreadImap),
           45000,
           `${mailbox.name}: 统计未读邮件超时`
         );
@@ -337,40 +464,73 @@ export async function processMailboxes(options: {
           currentEmailStepTotal: 0
         });
 
-        if (options.recoverInterrupted && mailbox.protocol === "imap") {
-          const maxProcessedUid = getMaxProcessedUid(mailbox.id);
-
-          if (maxProcessedUid > 0) {
-            persistRun(run, {
-              currentStage: "正在恢复旧任务可能遗漏的已读邮件"
-            });
-            try {
-              const recoveryItems = await withTimeout(
-                fetchInterruptedImapRecovery(mailbox, {
-                  afterUid: maxProcessedUid,
-                  uidWindow: 5000,
-                  limit: 5
-                }),
-                45000,
-                `${mailbox.name}: 中断恢复扫描超时`
-              );
-              if (recoveryItems.length) {
-                run.totalTaskCount = (run.totalTaskCount ?? 0) + recoveryItems.length;
-                persistRun(run);
-              }
-
-              for (const item of recoveryItems) {
-                await processFetchedItem(mailbox, item, true);
-                run.handledTaskCount = (run.handledTaskCount ?? 0) + 1;
-                persistRun(run);
-              }
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              persistRun(run, {
-                currentStage: `${message}，已跳过恢复扫描并继续读取未读邮件`
-              });
+        if (mailbox.protocol === "imap") {
+          const config = imapConfigFor(mailbox);
+          const attemptedPendingKeys = new Set<string>();
+          const processPending = async (pending: RawMail[]) => {
+            const freshPending = pending.filter(
+              (item) => !attemptedPendingKeys.has(fetchedMailExternalUid(item.key))
+            );
+            const expectedUnreadCount = unreadCountByMailbox.get(mailbox.id) ?? 0;
+            if (freshPending.length > expectedUnreadCount) {
+              const additional = freshPending.length - expectedUnreadCount;
+              run.totalUnreadCount = (run.totalUnreadCount ?? 0) + additional;
+              run.currentMailboxUnreadCount = (run.currentMailboxUnreadCount ?? 0) + additional;
+              run.totalTaskCount = (run.totalTaskCount ?? 0) + additional;
+              persistRun(run);
             }
+
+            for (const item of freshPending) {
+              const pendingKey = fetchedMailExternalUid(item.key);
+              attemptedPendingKeys.add(pendingKey);
+              run.currentSubject = `UID ${item.key.uid}`;
+              persistRun(run, {
+                currentStage: "正在解析和摘要 IMAP 邮件",
+                currentEmailStep: "解析邮件"
+              });
+              await processIncrementalImapItem(mailbox, item);
+              run.handledTaskCount = (run.handledTaskCount ?? 0) + 1;
+              run.handledUnreadCount = (run.handledUnreadCount ?? 0) + 1;
+              run.currentMailboxHandledCount = (run.currentMailboxHandledCount ?? 0) + 1;
+              persistRun(run);
+            }
+          };
+
+          const pendingBeforeFetch = readPendingFetchedMails(
+            config.ownerId,
+            config.mailboxId,
+            config.folder,
+            state.settings.system.processLimitPerMailbox
+          );
+          await processPending(pendingBeforeFetch);
+
+          let remoteError = "";
+          try {
+            await withTimeout(
+              fetchIncrementalImap(mailbox, state.settings.system.processLimitPerMailbox, imapReader),
+              120000,
+              `${mailbox.name}: IMAP 增量读取超时`
+            );
+          } catch (error) {
+            if (!pendingBeforeFetch.length) throw error;
+            remoteError = error instanceof Error ? error.message : String(error);
+            run.errors.push(`${mailbox.name}: ${remoteError}`);
+            persistRun(run, { currentStage: `本地 pending 已处理，IMAP 暂时不可用：${remoteError}` });
           }
+
+          const pendingAfterFetch = readPendingFetchedMails(
+            config.ownerId,
+            config.mailboxId,
+            config.folder,
+            state.settings.system.processLimitPerMailbox
+          );
+          await processPending(pendingAfterFetch);
+
+          updateMailboxSync(mailbox.id, {
+            lastSyncAt: new Date().toISOString(),
+            lastError: remoteError
+          });
+          continue;
         }
 
         const fetched = await withTimeout(

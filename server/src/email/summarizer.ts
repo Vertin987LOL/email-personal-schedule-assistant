@@ -8,6 +8,9 @@ export type Summary = {
   explanationZh: string;
   status: "ready" | "fallback";
   caveats: string[];
+  category?: ClassificationResult["category"];
+  reasonZh?: string;
+  actionItemsZh?: string[];
 };
 
 export type SummarizerError = {
@@ -95,7 +98,10 @@ export class AiSummarizer implements Summarizer {
           version: "v1",
           explanationZh,
           status: "ready",
-          caveats
+          caveats,
+          category: classification.category,
+          reasonZh: classification.reasonZh,
+          actionItemsZh: classification.actionItemsZh
         }
       };
     } catch (error) {

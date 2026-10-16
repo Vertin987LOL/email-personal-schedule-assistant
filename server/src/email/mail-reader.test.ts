@@ -15,6 +15,7 @@ type FakeMessage = {
 };
 
 class FakeImapClient {
+  omitFetchedMetadata = false;
   mailbox = {
     uidValidity: 10n,
     uidNext: 2,
@@ -46,7 +47,7 @@ class FakeImapClient {
   async *fetch(uids: number[], query: { source?: unknown }) {
     for (const uid of uids) {
       const message = this.messages.find((item) => item.uid === uid);
-      if (!message) continue;
+      if (!message || (this.omitFetchedMetadata && uid === 2)) continue;
       yield {
         uid,
         size: message.source.byteLength,
@@ -139,6 +140,33 @@ test("UIDVALIDITY change pauses incremental reading instead of moving the cursor
   if (result.ok) return;
   assert.equal(result.error.code, "CONFIG");
   assert.equal(result.error.retryable, false);
+});
+
+test("partial metadata fetch fails instead of advancing the cursor", async () => {
+  const fake = new FakeImapClient();
+  fake.messages.push({
+    uid: 2,
+    source: Buffer.from("Subject: missing metadata\r\n\r\nbody"),
+    internalDate: new Date("2026-10-16T00:01:00.000Z"),
+    seen: false
+  });
+  fake.mailbox.uidNext = 3;
+  fake.mailbox.exists = 2;
+  fake.omitFetchedMetadata = true;
+  const reader = new ImapMailReader(() => fake as unknown as ImapFlow);
+
+  const result = await reader.fetchAfter(config, {
+    ownerId: config.ownerId,
+    mailboxId: config.mailboxId,
+    folder: config.folder,
+    uidValidity: "10",
+    lastUid: "1"
+  }, 20);
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.error.code, "NETWORK");
+  assert.equal(result.error.retryable, true);
 });
 
 test("incremental reader rejects a batch larger than the contract limit", async () => {
