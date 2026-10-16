@@ -46,6 +46,13 @@ export function createCalendarRouter(input: CalendarRouterInput, ownerId = "loca
     } catch (error) { next(error); }
   });
 
+  router.post("/courses/proposals/:id/resolve", (req, res, next) => {
+    try {
+      const body = bodyObject(req.body);
+      res.json(courses.resolveImportProposal(String(req.params.id), body.decision, body.operationKey));
+    } catch (error) { next(error); }
+  });
+
   router.post("/courses/:id/occurrences/:date/exception", (req, res, next) => {
     try {
       const body = bodyObject(req.body);

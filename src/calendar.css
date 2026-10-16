@@ -29,6 +29,19 @@
 .course-import .course-checkbox { flex-direction: row; align-items: center; }
 .course-checkbox input { width: auto; }
 .course-import button { width: fit-content; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
+.course-proposals { margin: 16px 0; padding-top: 14px; border-top: 1px solid var(--line); }
+.course-proposals h3 { margin: 0 0 6px; }
+.course-proposals > p { margin: 6px 0 12px; }
+.course-proposal { padding: 12px; margin: 10px 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-strong); }
+.course-proposal-heading, .course-proposal-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.course-proposal-heading { justify-content: space-between; }
+.course-proposal-state { padding: 3px 7px; border-radius: 999px; background: #e5ece8; color: var(--muted); font-size: 12px; }
+.course-proposal-state.pending { background: #fff1cf; color: #815a12; }
+.course-proposal-state.rejected, .course-proposal-state.stale { background: #fbe9de; color: #8c351c; }
+.course-proposal-old, .course-proposal-new { margin: 8px 0; overflow-wrap: anywhere; }
+.course-proposal-new { color: var(--accent); }
+.course-proposal ul { margin: 8px 0; padding-left: 20px; }
+.course-proposal-actions { margin-top: 10px; }
 .calendar-grid .fc { --fc-border-color: var(--line); --fc-today-bg-color: #edf4e5; font-size: 13px; }
 .calendar-grid .fc-toolbar-title { font-size: 18px; }
 .calendar-grid .fc-button { font-size: 12px; }

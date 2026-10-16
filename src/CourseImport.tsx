@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import type { CourseImportResult, CourseSeries, CourseSeriesInput } from "../server/src/calendar/courses";
+import type { CourseImportProposal, CourseImportResult, CourseSeries, CourseSeriesInput } from "../server/src/calendar/courses";
 import { calendarRequest as request } from "./calendar-api";
 
 const weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
@@ -24,6 +24,34 @@ function weeks(text: string) {
   return [...result].sort((a, b) => a - b);
 }
 
+function courseSummary(item: CourseSeries | undefined) {
+  if (!item) return "当前课程不存在";
+  const weekText = item.teachingWeeks === "every_week" ? "每周" : `第 ${item.teachingWeeks.join(", ")} 周`;
+  return `${item.title} · ${weekdays[item.dayOfWeek - 1]} ${item.localStart}–${item.localEnd} · ${weekText} · ${item.location || "地点待补"}`;
+}
+
+function teachingWeekSummary(item: CourseSeries | undefined) {
+  if (!item) return "无";
+  return item.teachingWeeks === "every_week" ? "每周" : `第 ${item.teachingWeeks.join(", ")} 周`;
+}
+
+function proposalDiff(current: CourseSeries | undefined, proposed: CourseSeries) {
+  const changes: string[] = [];
+  if (!current || current.title !== proposed.title) changes.push(`课程：${current?.title || "无"} → ${proposed.title}`);
+  if (!current || current.dayOfWeek !== proposed.dayOfWeek) changes.push(`星期：${current ? weekdays[current.dayOfWeek - 1] : "无"} → ${weekdays[proposed.dayOfWeek - 1]}`);
+  if (!current || current.localStart !== proposed.localStart || current.localEnd !== proposed.localEnd) {
+    changes.push(`时间：${current ? `${current.localStart}–${current.localEnd}` : "无"} → ${proposed.localStart}–${proposed.localEnd}`);
+  }
+  const oldWeeks = teachingWeekSummary(current);
+  const newWeeks = teachingWeekSummary(proposed);
+  if (!current || oldWeeks !== newWeeks) changes.push(`教学周：${oldWeeks} → ${newWeeks}`);
+  if (!current || (current.location || "") !== (proposed.location || "")) changes.push(`地点：${current?.location || "地点待补"} → ${proposed.location || "地点待补"}`);
+  if (!current || current.termStart !== proposed.termStart || current.termEnd !== proposed.termEnd || current.week1StartsOn !== proposed.week1StartsOn) {
+    changes.push(`学期范围：${current ? `${current.termStart} 至 ${current.termEnd}` : "无"} → ${proposed.termStart} 至 ${proposed.termEnd}`);
+  }
+  return changes;
+}
+
 export function CourseImport({ onChanged }: { onChanged: () => Promise<void> }) {
   const [mode, setMode] = useState<"manual" | "ics">("manual");
   const [term, setTerm] = useState({ termStart: "", termEnd: "", week1StartsOn: "" });
@@ -31,14 +59,17 @@ export function CourseImport({ onChanged }: { onChanged: () => Promise<void> }) 
   const [ics, setIcs] = useState("");
   const [filename, setFilename] = useState("");
   const [series, setSeries] = useState<CourseSeries[]>([]);
+  const [proposals, setProposals] = useState<CourseImportProposal[]>([]);
   const [busy, setBusy] = useState(false);
+  const [resolving, setResolving] = useState<string>();
   const [error, setError] = useState("");
   const [report, setReport] = useState<CourseImportResult>();
   const operation = useRef<{ content: string; key: string } | undefined>(undefined);
   const fileSequence = useRef(0);
   async function refresh() {
-    const result = await request<{ series: CourseSeries[] }>("/courses");
+    const result = await request<{ series: CourseSeries[]; proposals: CourseImportProposal[] }>("/courses");
     setSeries(result.series);
+    setProposals(result.proposals);
   }
   useEffect(() => { void refresh().catch(() => undefined); }, []);
   function changeRow(index: number, patch: Partial<ReturnType<typeof newRow>>) {
@@ -59,6 +90,18 @@ export function CourseImport({ onChanged }: { onChanged: () => Promise<void> }) 
       setReport(result); await refresh(); await onChanged();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "课表导入失败"); }
     finally { setBusy(false); }
+  }
+  async function resolve(proposal: CourseImportProposal, decision: "approve" | "reject") {
+    setError(""); setResolving(proposal.id);
+    try {
+      await request<CourseImportProposal>(`/courses/proposals/${encodeURIComponent(proposal.id)}/resolve`, "POST", {
+        decision, operationKey: crypto.randomUUID()
+      });
+      await refresh(); await onChanged();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "课程变更处理失败");
+      await refresh().catch(() => undefined);
+    } finally { setResolving(undefined); }
   }
   return <details className="course-import">
     <summary>课表导入{series.length ? ` · 已有 ${series.length} 门课程` : ""}</summary>
@@ -97,6 +140,28 @@ export function CourseImport({ onChanged }: { onChanged: () => Promise<void> }) 
       {report.changed > 0 && <p>原课表仍保留。检测到的变更已保存，等待核对。</p>}
       {report.errors.map((item, index) => <p key={index}>未导入：{importError(item.message)}</p>)}
     </div>}
+    {proposals.length > 0 && <section className="course-proposals" aria-label="课程变更提案">
+      <h3>课程整系列变更</h3>
+      <p>接受前不会修改现有课程；每次接受只更新未被本人改单次、取消或手动编辑的课次。</p>
+      {proposals.map((proposal) => {
+        const current = series.find((item) => item.id === proposal.seriesId);
+        const changes = proposalDiff(current, proposal.proposed);
+        const pending = proposal.state === "pending";
+        return <article className="course-proposal" key={proposal.id}>
+          <div className="course-proposal-heading">
+            <strong>{proposal.proposed.title}</strong>
+            <span className={`course-proposal-state ${proposal.state}`}>{({ pending: "待确认", applied: "已接受", rejected: "已拒绝", stale: "已过期" })[proposal.state]}</span>
+          </div>
+          <p className="course-proposal-old">原课程：{courseSummary(current)}</p>
+          <p className="course-proposal-new">新课程：{courseSummary(proposal.proposed)}</p>
+          {changes.length > 0 && <ul>{changes.map((change) => <li key={change}>{change}</li>)}</ul>}
+          {pending && <div className="course-proposal-actions">
+            <button type="button" className="primary-button" disabled={Boolean(resolving)} onClick={() => { void resolve(proposal, "approve"); }}>接受整系列变更</button>
+            <button type="button" disabled={Boolean(resolving)} onClick={() => { void resolve(proposal, "reject"); }}>拒绝</button>
+          </div>}
+        </article>;
+      })}
+    </section>}
     {series.length > 0 && <details><summary>查看已导入课程</summary>{series.map((item) => <p key={item.id}>
       {item.title} · {weekdays[item.dayOfWeek - 1]} {item.localStart}—{item.localEnd} · {item.location || "地点待补"} · {item.teachingWeeks === "every_week" ? "每周" : `第${item.teachingWeeks.join("、")}周`}
     </p>)}</details>}

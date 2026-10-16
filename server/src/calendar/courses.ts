@@ -61,8 +61,9 @@ export type CourseImportProposal = {
   ownerId: string;
   importKey: string;
   seriesId: string;
+  expectedVersion?: number;
   proposed: CourseSeries;
-  state: "pending" | "rejected";
+  state: "pending" | "applied" | "rejected" | "stale";
   operationKey: string;
 };
 
@@ -81,6 +82,13 @@ export type CourseImportResult = {
 export type CourseExceptionResult = {
   exception: CourseOccurrenceException;
   event?: CalendarEvent;
+};
+
+type CourseEventInvalidation = {
+  eventId: string;
+  previousVersion: number;
+  currentVersion: number;
+  reason: "updated" | "cancelled";
 };
 
 export type IcsImportOptions = {
@@ -288,13 +296,19 @@ class CourseStore {
   }
 
   withTransaction<T>(work: () => T) {
-    this.db.exec("BEGIN IMMEDIATE");
+    const nested = this.db.isTransaction;
+    const savepoint = `course_${randomUUID().replace(/-/g, "")}`;
+    this.db.exec(nested ? `SAVEPOINT ${savepoint}` : "BEGIN IMMEDIATE");
     try {
       const value = work();
-      this.db.exec("COMMIT");
+      this.db.exec(nested ? `RELEASE SAVEPOINT ${savepoint}` : "COMMIT");
       return value;
     } catch (error) {
-      try { this.db.exec("ROLLBACK"); } catch { /* preserve original error */ }
+      try {
+        this.db.exec(nested
+          ? `ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}`
+          : "ROLLBACK");
+      } catch { /* preserve original error */ }
       throw error;
     }
   }
@@ -307,17 +321,22 @@ class CourseStore {
     return rowJson<CourseSeries>(this.db.prepare("SELECT data FROM calendar_course_series WHERE ownerId = ? AND importKey = ?").get(ownerId, importKey) as SqlRow | undefined);
   }
 
+  getSeriesVersion(ownerId: string, id: string) {
+    const row = this.db.prepare("SELECT version FROM calendar_course_series WHERE ownerId = ? AND id = ?").get(ownerId, id) as SqlRow | undefined;
+    return row ? Number(row.version) : undefined;
+  }
+
   listSeries(ownerId: string) {
     return (this.db.prepare("SELECT data FROM calendar_course_series WHERE ownerId = ? ORDER BY importKey, id").all(ownerId) as SqlRow[])
       .map((row) => rowJson<CourseSeries>(row) as CourseSeries);
   }
 
-  saveSeries(series: CourseSeries, now: string) {
+  saveSeries(series: CourseSeries, now: string, version = 1) {
     this.db.prepare(`
       INSERT INTO calendar_course_series(ownerId, id, importKey, version, data, createdAt, updatedAt)
       VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(ownerId, id) DO UPDATE SET version = excluded.version, data = excluded.data, updatedAt = excluded.updatedAt
-    `).run(series.ownerId, series.id, series.importKey, 1, JSON.stringify(series), now, now);
+    `).run(series.ownerId, series.id, series.importKey, version, JSON.stringify(series), now, now);
   }
 
   getInstance(ownerId: string, seriesId: string, occurrenceDate: string) {
@@ -367,10 +386,23 @@ class CourseStore {
     ).get(ownerId, importKey, payloadHash) as SqlRow | undefined);
   }
 
+  getProposalByPayloadHash(ownerId: string, importKey: string, payloadHash: string) {
+    return rowJson<CourseImportProposal>(this.db.prepare(
+      "SELECT data FROM calendar_course_import_proposals WHERE ownerId = ? AND importKey = ? AND payloadHash = ? ORDER BY createdAt DESC, id LIMIT 1"
+    ).get(ownerId, importKey, payloadHash) as SqlRow | undefined);
+  }
+
+  getProposal(ownerId: string, id: string) {
+    return rowJson<CourseImportProposal>(this.db.prepare(
+      "SELECT data FROM calendar_course_import_proposals WHERE ownerId = ? AND id = ?"
+    ).get(ownerId, id) as SqlRow | undefined);
+  }
+
   saveProposal(proposal: CourseImportProposal, payloadHash: string, now: string) {
     this.db.prepare(`
       INSERT INTO calendar_course_import_proposals(ownerId, id, importKey, seriesId, payloadHash, state, data, createdAt, updatedAt)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(ownerId, id) DO UPDATE SET state = excluded.state, data = excluded.data, updatedAt = excluded.updatedAt
     `).run(proposal.ownerId, proposal.id, proposal.importKey, proposal.seriesId, payloadHash, proposal.state, JSON.stringify(proposal), now, now);
   }
 
@@ -419,6 +451,88 @@ export class CourseCalendarService {
     return this.store.listProposals(this.ownerId, state);
   }
 
+  resolveImportProposal(proposalIdInput: unknown, decisionInput: unknown, operationKeyInput: unknown): CourseImportProposal {
+    const proposalId = requireString(proposalIdInput, "proposalId", 200);
+    const decision = decisionInput === "approve" || decisionInput === "reject" ? decisionInput : undefined;
+    if (!decision) throw new CourseCalendarError("INVALID_INPUT", "decision must be approve or reject");
+    const operationKey = requireOperation(operationKeyInput);
+    const operationPayload = { proposalId, decision };
+    const operationHash = hash(operationPayload);
+    const existingOperation = this.store.getOperation(this.ownerId, operationKey);
+    if (existingOperation) {
+      this.assertOperation(existingOperation, "series:resolve", operationHash);
+      return JSON.parse(existingOperation.resultJson) as CourseImportProposal;
+    }
+
+    let stale = false;
+    const invalidations: CourseEventInvalidation[] = [];
+    const result = this.store.withTransaction(() => {
+      const currentProposal = this.store.getProposal(this.ownerId, proposalId);
+      if (!currentProposal) throw new CourseCalendarError("NOT_FOUND", "course import proposal not found", 404);
+      if (currentProposal.state !== "pending") {
+        if ((decision === "approve" && currentProposal.state === "applied")
+          || (decision === "reject" && currentProposal.state === "rejected")) {
+          this.store.saveOperation({ ownerId: this.ownerId, operationKey, operationType: "series:resolve", payloadHash: operationHash, resultJson: JSON.stringify(currentProposal) }, nowIso());
+          return currentProposal;
+        }
+        throw new CourseCalendarError("CONFLICT", "course import proposal was already resolved", 409, { proposal: currentProposal });
+      }
+      if (decision === "reject") {
+        const rejected: CourseImportProposal = { ...currentProposal, state: "rejected" };
+        const now = nowIso();
+        this.store.saveProposal(rejected, hash(this.seriesComparable(rejected.proposed)), now);
+        this.store.saveOperation({ ownerId: this.ownerId, operationKey, operationType: "series:resolve", payloadHash: operationHash, resultJson: JSON.stringify(rejected) }, now);
+        return rejected;
+      }
+
+      const current = this.store.getSeries(this.ownerId, currentProposal.seriesId);
+      const currentVersion = current ? this.store.getSeriesVersion(this.ownerId, current.id) : undefined;
+      if (!current || currentVersion === undefined) {
+        throw new CourseCalendarError("STORAGE_FAILED", "course series for proposal is missing", 500);
+      }
+      // A legacy proposal without a stored baseline cannot be verified safely.
+      // Fail closed and require a fresh import instead of guessing a version.
+      if (currentProposal.expectedVersion === undefined || currentVersion !== currentProposal.expectedVersion) {
+        const staleProposal: CourseImportProposal = { ...currentProposal, state: "stale" };
+        this.store.saveProposal(staleProposal, hash(this.seriesComparable(staleProposal.proposed)), nowIso());
+        stale = true;
+        return staleProposal;
+      }
+
+      const oldDates = new Set(this.occurrenceDates(current));
+      const newDates = new Set(this.occurrenceDates(currentProposal.proposed));
+      const now = nowIso();
+      this.store.saveSeries(currentProposal.proposed, now, currentVersion + 1);
+      for (const date of new Set([...oldDates, ...newDates])) {
+        if (newDates.has(date)) {
+          this.materializeOccurrence(currentProposal.proposed, date, this.store.getException(this.ownerId, current.id, date), true, invalidations);
+          continue;
+        }
+        const instance = this.store.getInstance(this.ownerId, current.id, date);
+        if (!instance) continue;
+        const event = this.calendar.getEvent(instance.eventId);
+        if (event.status === "cancelled" || instance.importEventVersion === undefined || event.version !== instance.importEventVersion) continue;
+        const canceled: CalendarEvent = { ...event, status: "cancelled", version: event.version + 1 };
+        this.calendar.repository.updateEvent(canceled, nowIso());
+        this.store.saveInstance(this.ownerId, { ...instance, importEventVersion: canceled.version }, nowIso());
+        invalidations.push({ eventId: event.id, previousVersion: event.version, currentVersion: canceled.version, reason: "cancelled" });
+      }
+      const applied: CourseImportProposal = { ...currentProposal, state: "applied" };
+      this.store.saveProposal(applied, hash(this.seriesComparable(applied.proposed)), now);
+      this.store.saveOperation({ ownerId: this.ownerId, operationKey, operationType: "series:resolve", payloadHash: operationHash, resultJson: JSON.stringify(applied) }, now);
+      return applied;
+    });
+    if (stale) {
+      throw new CourseCalendarError("VERSION_CONFLICT", "course series changed after this proposal was created", 409, { proposal: result });
+    }
+    if (this.calendar.hooks.onReminderInvalidated) {
+      for (const invalidation of invalidations) {
+        try { this.calendar.hooks.onReminderInvalidated(invalidation); } catch { /* reminder invalidation is best effort */ }
+      }
+    }
+    return result;
+  }
+
   importSeries(operationKeyInput: unknown, rawSeries: unknown[]): CourseImportResult {
     const operationKey = requireOperation(operationKeyInput);
     if (!Array.isArray(rawSeries) || rawSeries.length === 0 || rawSeries.length > MAX_IMPORT_EVENTS) {
@@ -461,9 +575,17 @@ export class CourseCalendarService {
           continue;
         }
         const proposalPayloadHash = hash(this.seriesComparable(proposed));
-        const pending = this.store.getPendingProposal(this.ownerId, current.importKey, proposalPayloadHash);
+        const existingProposal = this.store.getProposalByPayloadHash(this.ownerId, current.importKey, proposalPayloadHash);
+        if (existingProposal?.state === "rejected") {
+          result.rejected += 1;
+          result.proposals.push(existingProposal);
+          result.series.push(current);
+          continue;
+        }
+        const pending = existingProposal?.state === "pending" ? existingProposal : undefined;
         const proposal = pending ?? {
           id: randomUUID(), ownerId: this.ownerId, importKey: current.importKey, seriesId: current.id,
+          expectedVersion: this.store.getSeriesVersion(this.ownerId, current.id) ?? 1,
           proposed, state: "pending" as const, operationKey
         };
         if (!pending) this.store.withTransaction(() => this.store.saveProposal(proposal, proposalPayloadHash, nowIso()));
@@ -688,7 +810,13 @@ export class CourseCalendarService {
     return { occurrences, createdOccurrences };
   }
 
-  private materializeOccurrence(series: CourseSeries, date: string, exception?: CourseOccurrenceException) {
+  private materializeOccurrence(
+    series: CourseSeries,
+    date: string,
+    exception?: CourseOccurrenceException,
+    applySeriesChange = false,
+    invalidations?: CourseEventInvalidation[]
+  ) {
     if (exception?.action === "cancel") {
       const instance = this.store.getInstance(this.ownerId, series.id, date);
       if (!instance) return { created: false, event: undefined };
@@ -713,8 +841,37 @@ export class CourseCalendarService {
       return { created: true, event };
     }
     const current = this.calendar.getEvent(instance.eventId);
+    if (applySeriesChange && current.status === "cancelled") {
+      // A calendar-page cancellation increments the event version without
+      // updating importEventVersion. Preserve that user tombstone. An event
+      // cancelled by a prior series application has both versions aligned and
+      // may be recreated if a later accepted series includes the date again.
+      if (instance.importEventVersion === undefined || current.version !== instance.importEventVersion) {
+        return { created: false, event: current };
+      }
+      const input = eventInputForSeries(series, date, exception);
+      const event: CalendarEvent = { id: randomUUID(), ownerId: this.ownerId, version: 1, ...input };
+      this.calendar.repository.insertEvent(event, nowIso());
+      this.store.saveInstance(this.ownerId, { ...instance, eventId: event.id, exceptionVersion: exception?.version ?? instance.exceptionVersion, importEventVersion: event.version }, nowIso());
+      return { created: true, event };
+    }
     if (exception?.origin === "import" && instance.importEventVersion !== undefined && current.version !== instance.importEventVersion) {
       return { created: false, event: current };
+    }
+    if (applySeriesChange && instance.importEventVersion !== undefined && current.version === instance.importEventVersion && current.status !== "cancelled") {
+      const input = eventInputForSeries(series, date, exception);
+      const next: CalendarEvent = {
+        ...current,
+        ...input,
+        ...(input.location === undefined ? { location: undefined } : {}),
+        id: current.id,
+        ownerId: current.ownerId,
+        version: current.version + 1
+      };
+      this.calendar.repository.updateEvent(next, nowIso());
+      this.store.saveInstance(this.ownerId, { ...instance, importEventVersion: next.version }, nowIso());
+      invalidations?.push({ eventId: current.id, previousVersion: current.version, currentVersion: next.version, reason: "updated" });
+      return { created: false, event: next };
     }
     if (exception && exception.version > instance.exceptionVersion && current.status !== "cancelled") {
       const next = this.calendar.updateEvent(current.id, current.version, `course:${series.id}:${date}:move:v${exception.version}`, {

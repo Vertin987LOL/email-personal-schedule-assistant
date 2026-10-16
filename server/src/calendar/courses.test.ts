@@ -192,6 +192,127 @@ test("changed imports create a pending proposal and leave the active series and 
   }
 });
 
+test("accepting a series proposal is atomic, versioned, and preserves manual occurrence edits", () => {
+  const { database, service } = course();
+  try {
+    const first = service.importSeries("accept-1", [series()]);
+    const manuallyEdited = allEvents(service).find((event) => event.sources[0].ref.endsWith("2026-01-20"))!;
+    service.calendar.updateEvent(manuallyEdited.id, manuallyEdited.version, "manual-title-edit", { title: "本人修改的课程名" });
+    const changed = service.importSeries("accept-2", [series({
+      localStart: "11:00", localEnd: "12:30", location: "Room 202", teachingWeeks: [2, 3]
+    })]);
+    const proposal = changed.proposals[0];
+    const applied = service.resolveImportProposal(proposal.id, "approve", "accept-proposal");
+    assert.equal(applied.state, "applied");
+    assert.equal(service.listSeries()[0].localStart, "11:00");
+
+    const events = allEvents(service);
+    const removed = events.find((event) => event.sources[0].ref.endsWith("2026-01-06"));
+    const added = events.find((event) => event.sources[0].ref.endsWith("2026-01-13"));
+    const preserved = events.find((event) => event.sources[0].ref.endsWith("2026-01-20"));
+    assert.equal(removed?.status, "cancelled");
+    assert.equal(startsAt(added!), "2026-01-13T03:00:00Z");
+    assert.equal(preserved?.title, "本人修改的课程名");
+    assert.equal(startsAt(preserved!), "2026-01-20T02:00:00Z");
+    assert.deepEqual(service.resolveImportProposal(proposal.id, "approve", "accept-proposal"), applied);
+    assert.equal(allEvents(service).length, 3);
+    assert.equal(first.series[0].id, applied.proposed.id);
+  } finally {
+    database.close();
+  }
+});
+
+test("rejecting a proposal is retained and the same candidate does not become pending again", () => {
+  const { database, service } = course();
+  try {
+    service.importSeries("reject-1", [series()]);
+    const changed = series({ localStart: "11:00", localEnd: "12:30" });
+    const pending = service.importSeries("reject-2", [changed]).proposals[0];
+    const rejected = service.resolveImportProposal(pending.id, "reject", "reject-proposal");
+    assert.equal(rejected.state, "rejected");
+    const replay = service.importSeries("reject-3", [changed]);
+    assert.equal(replay.rejected, 1);
+    assert.equal(replay.proposals[0].state, "rejected");
+    assert.equal(service.listImportProposals("pending").length, 0);
+    assert.equal(service.listImportProposals("rejected").length, 1);
+    assert.equal(service.listSeries()[0].localStart, "10:00");
+  } finally {
+    database.close();
+  }
+});
+
+test("accepting an old proposal is blocked after the series version advances", () => {
+  const { database, service } = course();
+  try {
+    service.importSeries("stale-1", [series()]);
+    const first = service.importSeries("stale-2", [series({ localStart: "11:00", localEnd: "12:30" })]).proposals[0];
+    const second = service.importSeries("stale-3", [series({ localStart: "12:00", localEnd: "13:30" })]).proposals[0];
+    service.resolveImportProposal(second.id, "approve", "stale-approve-new");
+    assert.throws(
+      () => service.resolveImportProposal(first.id, "approve", "stale-approve-old"),
+      (error: unknown) => error instanceof CalendarError && error.code === "VERSION_CONFLICT"
+    );
+    assert.equal(service.listSeries()[0].localStart, "12:00");
+    assert.equal(service.listImportProposals("stale").length, 1);
+    assert.equal(allEvents(service).filter((event) => event.status === "confirmed").length, 2);
+  } finally {
+    database.close();
+  }
+});
+
+test("a legacy proposal without an expected version fails closed and must be reimported", () => {
+  const { database, service } = course();
+  try {
+    service.importSeries("legacy-version-1", [series()]);
+    const proposal = service.importSeries("legacy-version-2", [series({ localStart: "11:00", localEnd: "12:30" })]).proposals[0];
+    const row = service.store.db.prepare("SELECT data FROM calendar_course_import_proposals WHERE ownerId = ? AND id = ?").get(service.ownerId, proposal.id) as { data: string };
+    const legacy = JSON.parse(row.data) as Record<string, unknown>;
+    delete legacy.expectedVersion;
+    service.store.db.prepare("UPDATE calendar_course_import_proposals SET data = ? WHERE ownerId = ? AND id = ?").run(JSON.stringify(legacy), service.ownerId, proposal.id);
+    assert.throws(
+      () => service.resolveImportProposal(proposal.id, "approve", "legacy-version-approve"),
+      (error: unknown) => error instanceof CalendarError && error.code === "VERSION_CONFLICT"
+    );
+    assert.equal(service.listSeries()[0].localStart, "10:00");
+    assert.equal(service.listImportProposals("stale").length, 1);
+  } finally {
+    database.close();
+  }
+});
+
+test("failed proposal application rolls back the series and keeps the proposal pending", () => {
+  const { database, service } = course();
+  try {
+    service.importSeries("rollback-1", [series()]);
+    const changed = service.importSeries("rollback-2", [series({ localStart: "11:00", localEnd: "12:30" })]).proposals[0];
+    const instance = service.store.getInstance(service.ownerId, changed.seriesId, "2026-01-06");
+    assert.ok(instance);
+    service.store.db.prepare("DELETE FROM calendar_events WHERE ownerId = ? AND id = ?").run(service.ownerId, instance.eventId);
+    assert.throws(() => service.resolveImportProposal(changed.id, "approve", "rollback-approve"));
+    assert.equal(service.listSeries()[0].localStart, "10:00");
+    assert.equal(service.listImportProposals("pending").length, 1);
+  } finally {
+    database.close();
+  }
+});
+
+test("accepting a later series proposal does not resurrect a manually cancelled occurrence", () => {
+  const { database, service } = course();
+  try {
+    const imported = service.importSeries("manual-cancel-series-1", [series()]);
+    const occurrence = allEvents(service).find((event) => event.sources[0].ref.endsWith("2026-01-06"))!;
+    service.calendar.cancelEvent(occurrence.id, occurrence.version, "manual-cancel-occurrence");
+    const proposal = service.importSeries("manual-cancel-series-2", [series({ localStart: "11:00", localEnd: "12:30" })]).proposals[0];
+    service.resolveImportProposal(proposal.id, "approve", "manual-cancel-approve");
+    const after = allEvents(service).find((event) => event.sources[0].ref.endsWith("2026-01-06"));
+    assert.equal(after?.status, "cancelled");
+    assert.equal(after?.version, occurrence.version + 1);
+    assert.equal(imported.series[0].id, proposal.seriesId);
+  } finally {
+    database.close();
+  }
+});
+
 test("a cancellation exception affects one occurrence and remains a tombstone after reimport", () => {
   const { database, service } = course();
   try {
