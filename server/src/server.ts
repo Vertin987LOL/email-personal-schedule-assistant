@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import cors from "cors";
 import express from "express";
 import router from "./routes";
+import { createCalendarRouter } from "./calendar/routes";
 import { startProcessingWorker } from "./email/processor";
 import { startImapIdleWatchers } from "./email/imap-idle";
 import {
@@ -24,6 +25,7 @@ import {
 import { apiRateLimit, corsOrigin, csrfProtection, securityHeaders } from "./security";
 import {
   hasInterruptedRecoveryRetry,
+  getAppDatabase,
   markInterruptedRuns,
   resumePausedNotificationDeliveries
 } from "./store";
@@ -47,6 +49,7 @@ app.use(securityHeaders);
 app.use(cors({ origin: corsOrigin, credentials: true, methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] }));
 app.use(express.json({ limit: "10mb", strict: true }));
 app.use("/api", apiRateLimit, csrfProtection);
+app.use("/api/calendar", createCalendarRouter(getAppDatabase()));
 app.use("/api", router);
 app.use(
   express.static(distDir, {

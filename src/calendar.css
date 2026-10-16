@@ -1,0 +1,26 @@
+.calendar-page { flex: 1; min-width: 0; overflow: auto; padding: 4px 4px 28px; }
+.calendar-toolbar, .calendar-actions, .calendar-filter { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.calendar-toolbar { margin-bottom: 16px; }
+.calendar-toolbar strong { font-size: 22px; }
+.calendar-toolbar p, .calendar-help { color: var(--muted); font-size: 13px; }
+.calendar-actions button, .calendar-editor button { border: 1px solid var(--line); padding: 9px 12px; background: var(--surface); border-radius: 9px; cursor: pointer; }
+.calendar-layout { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; align-items: start; }
+.calendar-grid, .calendar-editor { background: var(--surface); border: 1px solid var(--line); border-radius: 15px; padding: 16px; min-width: 0; }
+.calendar-filter { font-size: 12px; color: var(--muted); margin-bottom: 18px; }
+.calendar-filter input, .calendar-editor input, .calendar-editor select { min-width: 0; width: 100%; border: 1px solid var(--line); background: var(--surface-strong); color: var(--ink); border-radius: 8px; padding: 9px; font: inherit; }
+.calendar-filter input { max-width: 230px; }
+.calendar-editor h3 { margin-top: 0; }
+.calendar-editor form, .calendar-editor label { display: flex; flex-direction: column; gap: 7px; }
+.calendar-editor form { gap: 14px; }
+.calendar-editor label { font-size: 13px; color: var(--muted); }
+.calendar-field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.calendar-source { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 14px; font-size: 12px; overflow-wrap: anywhere; }
+.calendar-message { background: #e0eee7; border-radius: 8px; padding: 10px 14px; }
+.calendar-message.error { background: #fbe9de; color: #8c351c; }
+.calendar-proposals article { border-top: 1px solid var(--line); padding: 12px 0; font-size: 13px; }
+.calendar-grid .fc { --fc-border-color: var(--line); --fc-today-bg-color: #edf4e5; font-size: 13px; }
+.calendar-grid .fc-toolbar-title { font-size: 18px; }
+.calendar-grid .fc-button { font-size: 12px; }
+.calendar-grid .fc-timegrid-event { border-radius: 5px; }
+@media (max-width: 1150px) { .calendar-layout { grid-template-columns: 1fr; } .calendar-editor { max-width: 700px; width: 100%; } }
+@media (max-width: 700px) { .calendar-grid { padding: 8px; overflow-x: auto; } .calendar-grid .fc { min-width: 620px; } .calendar-filter { min-width: 0; } .calendar-actions { gap: 6px; } }

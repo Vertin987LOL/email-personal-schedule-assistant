@@ -12,6 +12,7 @@
     "start:app": "node --import tsx server/src/server.ts"
   },
   "dependencies": {
+    "@fullcalendar/react": "7.1.2",
     "@phosphor-icons/react": "^2.1.10",
     "@vitejs/plugin-react": "^5.1.1",
     "cors": "^2.8.5",
@@ -19,12 +20,14 @@
     "express": "^5.2.1",
     "imapflow": "^1.7.1",
     "mailparser": "^3.9.20",
+    "node-ical": "0.27.3",
     "qrcode": "^1.5.4",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "sharp": "^0.35.4",
+    "temporal-polyfill": "1.0.1",
     "ws": "^8.21.3",
     "zod": "^4.2.1"
   },

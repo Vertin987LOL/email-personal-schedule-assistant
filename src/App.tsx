@@ -39,6 +39,7 @@ import { api } from "./api";
 import { parseEmailReadStateEvent } from "./app-events";
 import { MarkdownContent } from "./MarkdownContent";
 import { ModelUsagePage } from "./ModelUsagePage";
+import { CalendarPage } from "./CalendarPage";
 import { QqNotificationPanel } from "./QqNotificationPanel";
 import {
   AI_PROVIDER_PRESETS,
@@ -67,7 +68,7 @@ import type {
 } from "./types";
 import { extractWeclawQrUrl, shouldShowWeclawQr } from "./weclaw-ui";
 
-type View = "mail" | "notifications" | "usage" | "settings";
+type View = "calendar" | "mail" | "notifications" | "usage" | "settings";
 type NotificationQueueStatus = NotificationDeliveryStatus | "failed";
 type EmailContextMenu = {
   x: number;
@@ -423,7 +424,7 @@ function createSafeEmailSrcDoc(
 }
 
 function ConsoleApp({ onLogout }: { onLogout: () => void }) {
-  const [view, setView] = useState<View>("mail");
+  const [view, setView] = useState<View>("calendar");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [activeCategory, setActiveCategory] = useState<MailCategory>("important");
   const [selectedMailbox, setSelectedMailbox] = useState("all");
@@ -1128,7 +1129,7 @@ function ConsoleApp({ onLogout }: { onLogout: () => void }) {
 
   const activeMailboxName =
     selectedMailbox === "all" ? "全部邮箱" : mailboxMap.get(selectedMailbox)?.name || "当前邮箱";
-  const pageEyebrow = view === "mail"
+  const pageEyebrow = view === "calendar" ? "本地日程" : view === "mail"
     ? activeMailboxName
     : view === "notifications"
       ? "QQ 通知"
@@ -1136,6 +1137,7 @@ function ConsoleApp({ onLogout }: { onLogout: () => void }) {
         ? "AI 可观测性"
         : "系统配置";
   const pageTitle = {
+    calendar: "我的日历",
     mail: "邮件处理台",
     notifications: "通知队列",
     usage: "模型用量",
@@ -1162,12 +1164,15 @@ function ConsoleApp({ onLogout }: { onLogout: () => void }) {
             <EnvelopeSimple size={22} weight="duotone" />
           </div>
           <div>
-            <strong>自动邮件系统</strong>
-            <span>AI Inbox Console</span>
+            <strong>本地日程系统</strong>
+            <span>Calendar &amp; Mail</span>
           </div>
         </div>
 
         <nav className="nav-stack">
+          <button className={view === "calendar" ? "nav-item active" : "nav-item"} onClick={() => setView("calendar")}>
+            <ClockCounterClockwise size={18} />我的日历
+          </button>
           <div className={mailNavExpanded ? "nav-group active" : "nav-group"}>
             <button className={view === "mail" ? "nav-item active" : "nav-item"} onClick={() => setView("mail")}>
               <SealCheck size={18} />
@@ -1244,6 +1249,7 @@ function ConsoleApp({ onLogout }: { onLogout: () => void }) {
             <h1>{pageTitle}</h1>
           </div>
           <div className="topbar-actions">
+            {view !== "calendar" && <>
             <div className={dashboard?.processorRunning ? "run-state running" : "run-state"}>
               <span />
               {runStatusText}
@@ -1258,13 +1264,14 @@ function ConsoleApp({ onLogout }: { onLogout: () => void }) {
               <Play size={18} weight="fill" />
               <span className="button-label">{busy ? "处理中" : "立即处理"}</span>
             </button>
+            </>}
             <button className="ghost-button icon-button" onClick={onLogout} title="退出登录" aria-label="退出登录">
               <SignOut size={18} />
             </button>
           </div>
         </header>
 
-        {view === "mail" ? (
+        {view === "calendar" ? <CalendarPage /> : view === "mail" ? (
           <section
             ref={mailLayoutRef}
             className={detailOpen ? "mail-layout detail-open" : "mail-layout"}
@@ -1526,6 +1533,9 @@ function ConsoleApp({ onLogout }: { onLogout: () => void }) {
       </main>
 
       <nav className="mobile-tabbar" aria-label="主导航">
+        <button type="button" className={view === "calendar" ? "active" : ""} onClick={() => { setView("calendar"); setDetailOpen(false); }}>
+          <ClockCounterClockwise size={20} /><span>日历</span>
+        </button>
         <button
           type="button"
           className={view === "mail" ? "active" : ""}
