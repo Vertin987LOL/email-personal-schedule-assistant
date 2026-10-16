@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
+import { createServer } from "node:http";
 import test from "node:test";
+import express from "express";
+import { createSessionToken } from "../auth-crypto";
+import { readSettings } from "../store";
 import { CalendarRepository } from "./repository";
 import { CalendarService } from "./service";
+import { createCalendarRouter } from "./routes";
 import { CourseCalendarService, type CourseSeriesInput } from "./courses";
 import { CalendarEmailAnalysisService, renderEmailCalendarAnalysis, validateEmailCalendarExtraction, type EmailCalendarInput } from "./email-analysis";
 import type { CalendarEventInput } from "./types";
@@ -159,6 +164,54 @@ test("N8: reliable external ID update stores a proposal without overwriting the 
   assert.equal(result.activities[0].status, "proposed");
   assert.equal(target.getEvent(eventId).title, "讲座");
   assert.equal(target.listProposals()[0].expectedVersion, target.getEvent(eventId).version);
+});
+
+test("email proposal approval rechecks conflicts and generic resolution cannot bypass policy", async () => {
+  const target = calendar();
+  const analysis = new CalendarEmailAnalysisService(target);
+  const first = analysis.finalize(mail());
+  const eventId = first.activities[0].eventId!;
+  const revised = analysis.finalize(mail({ emailId: "email-review-update", sourceKey: "mail-review-update", bodyText: "讲座 ext-1 改至17点", modelText: JSON.stringify({ summaryZh: "改期", activities: [activity({ title: "讲座", action: "update", externalEventId: "ext-1", evidence: "ext-1 改至17点", time: { kind: "interval", startsAt: "2026-10-20T17:00:00+08:00", endsAt: "2026-10-20T19:00:00+08:00", timeZone: ZONE } })] }) }));
+  const proposalId = revised.activities[0].proposalId!;
+  target.createEvent("blocking-event", existing({ title: "已有安排", time: { kind: "interval", startsAt: "2026-10-20T18:00:00+08:00", endsAt: "2026-10-20T19:00:00+08:00", timeZone: ZONE } }));
+  const app = express();
+  app.use(express.json());
+  app.use("/api/calendar", createCalendarRouter(target));
+  const server = createServer(app);
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const base = `http://127.0.0.1:${address.port}/api/calendar`;
+  const headers = { "content-type": "application/json", cookie: `auto_mail_session=${createSessionToken(readSettings().auth)}` };
+  try {
+    const listed = await fetch(`${base}/proposals`, { headers });
+    const list = await listed.json() as { emailReviews: Record<string, { subject: string; target: { id: string } }> };
+    assert.equal(list.emailReviews[proposalId]?.subject, "活动通知");
+    assert.equal(list.emailReviews[proposalId]?.target.id, eventId);
+    const generic = await fetch(`${base}/proposals/${proposalId}/resolve`, { method: "POST", headers, body: JSON.stringify({ decision: "approve", operationKey: "unsafe-generic" }) });
+    assert.equal(generic.status, 403);
+    const conflicted = await fetch(`${base}/email-proposals/${proposalId}/resolve`, { method: "POST", headers, body: JSON.stringify({ decision: "approve", operationKey: "email-approve", expectedVersion: target.getEvent(eventId).version }) });
+    assert.equal(conflicted.status, 409);
+    assert.equal(target.getEvent(eventId).title, "讲座");
+    assert.equal(target.listProposals()[0].state, "pending");
+    const rejected = await fetch(`${base}/email-proposals/${proposalId}/resolve`, { method: "POST", headers, body: JSON.stringify({ decision: "reject", operationKey: "email-reject", expectedVersion: target.getEvent(eventId).version }) });
+    assert.equal(rejected.status, 200);
+    assert.equal(target.listProposals()[0].state, "rejected");
+    const safeChange = analysis.finalize(mail({ emailId: "email-review-safe", sourceKey: "mail-review-safe", bodyText: "讲座 ext-1 改至20点", modelText: JSON.stringify({ summaryZh: "改期", activities: [activity({ title: "讲座", action: "update", externalEventId: "ext-1", evidence: "ext-1 改至20点", time: { kind: "interval", startsAt: "2026-10-20T20:00:00+08:00", endsAt: "2026-10-20T21:00:00+08:00", timeZone: ZONE } })] }) }));
+    const safeId = safeChange.activities[0].proposalId!;
+    const safeVersion = target.getEvent(eventId).version;
+    const approved = await fetch(`${base}/email-proposals/${safeId}/resolve`, { method: "POST", headers, body: JSON.stringify({ decision: "approve", operationKey: "email-safe-approve", expectedVersion: safeVersion }) });
+    assert.equal(approved.status, 200);
+    const appliedTime = target.getEvent(eventId).time;
+    assert.equal(appliedTime.kind, "interval");
+    if (appliedTime.kind === "interval") assert.equal(appliedTime.startsAt, "2026-10-20T20:00:00+08:00");
+    const replay = await fetch(`${base}/email-proposals/${safeId}/resolve`, { method: "POST", headers, body: JSON.stringify({ decision: "approve", operationKey: "email-safe-approve", expectedVersion: safeVersion }) });
+    assert.equal(replay.status, 200);
+    assert.equal(target.getEvent(eventId).version, safeVersion + 1);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    target.repository.db.close();
+  }
 });
 
 test("N9: an email cannot forge a deletion without a module-owned external match", () => {

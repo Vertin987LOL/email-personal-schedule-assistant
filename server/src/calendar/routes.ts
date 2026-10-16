@@ -3,6 +3,7 @@ import express from "express";
 import { requireAuth } from "../auth";
 import { CalendarError, CalendarService } from "./service";
 import { CourseCalendarService, type IcsImportOptions } from "./courses";
+import { CalendarToolService, getProposalPolicy } from "./agent-tools";
 
 export type CalendarRouterInput = DatabaseSync | CalendarService;
 
@@ -23,6 +24,7 @@ function stringQuery(value: unknown, field: string) {
 export function createCalendarRouter(input: CalendarRouterInput, ownerId = "local-owner") {
   const service = input instanceof CalendarService ? input : new CalendarService(input, ownerId);
   const courses = new CourseCalendarService(service);
+  const tools = new CalendarToolService(service);
   const router = express.Router();
 
   router.use(requireAuth);
@@ -148,7 +150,14 @@ export function createCalendarRouter(input: CalendarRouterInput, ownerId = "loca
   router.get("/proposals", (req, res, next) => {
     try {
       const state = typeof req.query.state === "string" ? req.query.state as never : undefined;
-      res.json({ proposals: service.listProposals(state) });
+      const proposals = service.listProposals(state);
+      const emailReviews = Object.fromEntries(proposals.flatMap(proposal => {
+        const source = emailProposalSource(proposal.id);
+        if (!source) return [];
+        const target = proposal.targetId ? service.getEvent(proposal.targetId) : undefined;
+        return [[proposal.id, { ...source, target }]];
+      }));
+      res.json({ proposals, emailReviews });
     } catch (error) {
       next(error);
     }
@@ -164,6 +173,7 @@ export function createCalendarRouter(input: CalendarRouterInput, ownerId = "loca
 
   router.post("/proposals/:id/resolve", (req, res, next) => {
     try {
+      if (getProposalPolicy(service, String(req.params.id))) throw new CalendarError("FORBIDDEN", "policy-backed proposals require their dedicated confirmation path", 403);
       const body = bodyObject(req.body);
       res.json(service.resolveProposal(
         String(req.params.id),
@@ -174,6 +184,58 @@ export function createCalendarRouter(input: CalendarRouterInput, ownerId = "loca
     } catch (error) {
       next(error);
     }
+  });
+
+  function emailProposalSource(proposalId: string) {
+    const row = service.repository.db.prepare("SELECT taskId FROM calendar_tool_proposal_policies WHERE ownerId = ? AND proposalId = ?")
+      .get(service.ownerId, proposalId) as { taskId: string } | undefined;
+    if (!row) return undefined;
+    const analyses = service.repository.db.prepare("SELECT data, fromAddress FROM calendar_email_analysis WHERE ownerId = ?")
+      .all(service.ownerId) as Array<{ data: string; fromAddress: string | null }>;
+    for (const { data, fromAddress } of analyses) {
+      try {
+        const analysis = JSON.parse(data) as { emailId: string; sourceKey: string; subject: string; activities?: Array<{ proposalId?: string }> };
+        if (analysis.activities?.some(activity => activity.proposalId === proposalId)) {
+          return { emailId: analysis.emailId, sourceKey: analysis.sourceKey, subject: analysis.subject, fromAddress };
+        }
+      } catch { /* A malformed historical analysis never grants a review action. */ }
+    }
+    return undefined;
+  }
+
+  router.post("/email-proposals/:id/resolve", (req, res, next) => {
+    try {
+      const proposalId = String(req.params.id);
+      const body = bodyObject(req.body);
+      if (body.decision !== "approve" && body.decision !== "reject") throw new CalendarError("INVALID_INPUT", "decision must be approve or reject");
+      if (!emailProposalSource(proposalId)) throw new CalendarError("NOT_FOUND", "email proposal not found", 404);
+      const policy = service.repository.db.prepare(`
+        SELECT taskId, operationId, requireFree, targetId, expectedVersion
+        FROM calendar_tool_proposal_policies WHERE ownerId = ? AND proposalId = ?
+      `).get(service.ownerId, proposalId) as { taskId: string; operationId: string; requireFree: number; targetId: string; expectedVersion: number };
+      const result = service.repository.withTransaction(() => {
+        const proposal = service.repository.getProposal(service.ownerId, proposalId);
+        if (!proposal || proposal.operationKey !== policy.operationId || proposal.targetId !== policy.targetId ||
+            proposal.expectedVersion !== policy.expectedVersion || !["update", "cancel"].includes(proposal.action)) {
+          throw new CalendarError("VERSION_CONFLICT", "email proposal policy does not match proposal", 409);
+        }
+        const target = service.getEvent(policy.targetId);
+        if (target.kind === "course" || !target.sources.some(source => source.kind === "email")) {
+          throw new CalendarError("FORBIDDEN", "email proposal cannot modify this event", 403);
+        }
+        if (proposal.state === "pending" && body.decision === "approve") {
+          if (target.version !== policy.expectedVersion) throw new CalendarError("VERSION_CONFLICT", "target version changed", 409);
+          if (policy.requireFree) {
+            const check = tools.invoke("calendar.preview", {
+              targetId: proposal.targetId, expectedVersion: proposal.expectedVersion, patch: proposal.patch, requireFree: true
+            }, { taskId: policy.taskId, source: { kind: "email", ref: proposal.operationKey }, isActive: () => true });
+            if (!check.ok) throw new CalendarError(check.error.code, check.error.message, 409, check.error.details);
+          }
+        }
+        return service.resolveProposal(proposalId, body.decision, body.operationKey, body.expectedVersion);
+      });
+      res.json(result);
+    } catch (error) { next(error); }
   });
 
   router.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

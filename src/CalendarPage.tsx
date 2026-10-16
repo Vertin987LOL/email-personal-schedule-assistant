@@ -19,6 +19,7 @@ import { CalendarDeliveries } from "./CalendarDeliveries";
 const ZONE = "Asia/Shanghai";
 const labels = { course: "课程", activity: "活动", deadline: "截止", time_block: "时间安排" };
 const statusLabels = { confirmed: "已确认", tentative: "待确认", cancelled: "已取消", ignored: "已忽略" };
+type EmailReview = { emailId: string; sourceKey: string; subject: string; fromAddress: string | null; target?: CalendarItem };
 
 function dateTime(value: string) {
   return Temporal.Instant.from(value).toZonedDateTimeISO(ZONE).toPlainDateTime().toString({ smallestUnit: "minute" });
@@ -104,6 +105,7 @@ export function CalendarPage() {
   const loadSequence = useRef(0);
   const [items, setItems] = useState<CalendarItem[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
+  const [emailReviews, setEmailReviews] = useState<Record<string, EmailReview>>({});
   const [agentTasks, setAgentTasks] = useState<CalendarTask[]>([]);
   const [selected, setSelected] = useState<CalendarItem>();
   const [selectedPreview, setSelectedPreview] = useState<CalendarProposalPreview>();
@@ -125,12 +127,13 @@ export function CalendarPage() {
     try {
       const [events, pending, taskResult] = await Promise.all([
         request<{ events: CalendarItem[] }>(`/events?from=${encodeURIComponent(requestedRange.from)}&to=${encodeURIComponent(requestedRange.to)}`),
-        request<{ proposals: Proposal[] }>("/proposals"),
+        request<{ proposals: Proposal[]; emailReviews: Record<string, EmailReview> }>("/proposals"),
         request<{ tasks: CalendarTask[] }>("/agent/tasks").catch(() => ({ tasks: [] as CalendarTask[] }))
       ]);
       if (sequence !== loadSequence.current || currentRange.current?.from !== requestedRange.from || currentRange.current?.to !== requestedRange.to) return;
       setItems(events.events);
       setProposals(pending.proposals.filter((proposal) => proposal.state === "pending"));
+      setEmailReviews(pending.emailReviews ?? {});
       setAgentTasks(taskResult.tasks);
       setError("");
     } catch (cause) { if (sequence === loadSequence.current) setError(cause instanceof Error ? cause.message : "读取日程失败"); }
@@ -159,6 +162,18 @@ export function CalendarPage() {
   const visibleConflictCount = visible.filter((item) => conflicts.has(item.id)).length;
   const proposalPreviews = useMemo(() => projectPendingProposals(proposals, items, agentTasks), [proposals, items, agentTasks]);
   const visiblePreviews = proposalPreviews.filter((preview) => `${preview.title} ${preview.location ?? ""}`.toLowerCase().includes(search.toLowerCase()));
+  async function resolveEmailProposal(proposal: Proposal, decision: "approve" | "reject") {
+    setBusy(true); setError(""); setNotice("");
+    try {
+      await request(`/email-proposals/${encodeURIComponent(proposal.id)}/resolve`, "POST", {
+        decision, expectedVersion: proposal.expectedVersion, operationKey: `email-review:${proposal.id}:${decision}`
+      });
+      setSelectedPreview(undefined);
+      setNotice(decision === "approve" ? "邮件变更已确认，日历已更新。" : "已拒绝邮件变更，原日程保留。");
+      await reload();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "处理邮件变更失败"); await reload(); }
+    finally { setBusy(false); }
+  }
   const formalEvents: EventInput[] = visible.map((item): EventInput => {
     const prefix = `${item.status === "tentative" ? "待确认 · " : ""}${conflicts.has(item.id) ? "重叠 · " : ""}`;
     const color = item.kind === "course" ? "#315eaa" : item.kind === "deadline" ? "#a54a30" : item.status === "tentative" ? "#8b6a23" : "#23634f";
@@ -295,7 +310,10 @@ export function CalendarPage() {
               {selectedPreview.conflictsWith.map((item) => <p key={item.id}>{item.title} · {describe(item.time)}</p>)}
             </div> : <p>本页已载入条目未发现时间段重叠；课表未核对完整时仍需人工确认。</p>}
             <p className="calendar-help">这是暂存预览；确认前不会写入正式日历。</p>
-            {selectedPreview.taskId ? <button type="button" className="primary-button" onClick={() => setFocusRequest({ taskId: selectedPreview.taskId!, requestId: ++focusRequestId.current })}>打开对应任务的安全确认入口</button> :
+            {selectedPreview.taskId ? <button type="button" className="primary-button" onClick={() => setFocusRequest({ taskId: selectedPreview.taskId!, requestId: ++focusRequestId.current })}>打开对应任务的安全确认入口</button> : emailReviews[selectedPreview.proposal.id] ?
+              <div><p>邮件提出改期；确认前请核对原邮件、当前活动和时间冲突。</p>
+                <button type="button" disabled={busy} onClick={() => { void resolveEmailProposal(selectedPreview.proposal, "approve"); }}>确认邮件改期</button>
+                <button type="button" disabled={busy} onClick={() => { void resolveEmailProposal(selectedPreview.proposal, "reject"); }}>保留原安排</button></div> :
               <p className="calendar-help">此提案没有可定位的任务确认入口。</p>}
           </div>
         </> : <>
@@ -328,8 +346,19 @@ export function CalendarPage() {
           {selected.sourceEvidence && <p>原文依据：{selected.sourceEvidence}</p>}
           <p>来源：{selected.sources.map((source) => ({ manual: "手动录入", course: "课表", email: "邮件", plan: "排程" })[source.kind]).join("；")}</p>
           <details><summary>来源记录编号</summary>{selected.sources.map((source) => <p key={`${source.kind}:${source.ref}`}>{source.ref}</p>)}</details></div>}
-        {proposals.length > 0 && <div className="calendar-proposals"><h3>待处理变更 · {proposals.length}</h3>{proposals.map((proposal) => <article key={proposal.id}>
-          <strong>待确认的日程变更</strong><p>{proposal.evidence}</p></article>)}</div>}
+        {proposals.length > 0 && <div className="calendar-proposals"><h3>待处理变更 · {proposals.length}</h3>{proposals.map((proposal) => {
+          const emailReview = emailReviews[proposal.id];
+          const target = emailReview?.target ?? items.find(item => item.id === proposal.targetId);
+          return <article key={proposal.id}>
+            <strong>{proposal.action === "cancel" ? "待确认取消" : proposal.action === "update" ? "待确认改期" : "待确认的日程变更"}</strong>
+            {target && <p>现有：{target.title} · {describe(target.time)}（版本 {target.version}）</p>}
+            {proposal.patch?.time && <p>建议：{describe(proposal.patch.time)}</p>}
+            <p>依据：{proposal.evidence}</p>
+            {emailReview && <p>邮件：{emailReview.subject} · {emailReview.fromAddress ?? "发件人未知"}（编号 {emailReview.emailId}）。请与原通知核对；若新时段与已录入活动冲突，系统会拒绝直接确认。</p>}
+            {emailReview && <><button type="button" disabled={busy} onClick={() => { void resolveEmailProposal(proposal, "approve"); }}>确认变更</button>
+              <button type="button" disabled={busy} onClick={() => { void resolveEmailProposal(proposal, "reject"); }}>保留原安排</button></>}
+          </article>;
+        })}</div>}
         </>}
       </aside>
     </div>
