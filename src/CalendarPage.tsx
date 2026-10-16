@@ -6,13 +6,14 @@ import classicThemePlugin from "@fullcalendar/react/themes/classic";
 import zhCn from "@fullcalendar/react/locales/zh-cn";
 import { Temporal } from "temporal-polyfill";
 import type { CalendarEvent as CalendarItem, CalendarTime as EventTime, ChangeProposal as Proposal } from "../server/src/calendar/types";
+import type { CalendarTask } from "../server/src/calendar/agent-tasks";
 import "@fullcalendar/react/skeleton.css";
 import "@fullcalendar/react/themes/classic/theme.css";
 import "@fullcalendar/react/themes/classic/palette.css";
 import "./calendar.css";
 import { calendarRequest as request } from "./calendar-api";
 import { CourseImport } from "./CourseImport";
-import { CalendarCommands } from "./CalendarCommands";
+import { CalendarCommands, type CalendarFocusRequest } from "./CalendarCommands";
 import { CalendarDeliveries } from "./CalendarDeliveries";
 
 const ZONE = "Asia/Shanghai";
@@ -25,10 +26,66 @@ function dateTime(value: string) {
 function instant(value: string) {
   return Temporal.PlainDateTime.from(value).toZonedDateTime(ZONE).toInstant().toString();
 }
+function localDateTime(value: string, timeZone = ZONE) {
+  return Temporal.Instant.from(value).toZonedDateTimeISO(timeZone).toPlainDateTime().toString({ smallestUnit: "minute" });
+}
 function describe(time: EventTime) {
   if (time.kind === "date") return `${time.onDate} · 仅日期`;
   const start = dateTime(time.kind === "point" ? time.at : time.startsAt).replace("T", " ");
   return time.kind === "point" ? `${start} · 截止点` : `${start} — ${dateTime(time.endsAt).replace("T", " ")}`;
+}
+function previewTimeLabel(time: EventTime) {
+  if (time.kind === "date") return `${time.onDate} · 仅日期`;
+  const start = localDateTime(time.kind === "point" ? time.at : time.startsAt, time.timeZone).replace("T", " ");
+  return time.kind === "point" ? `${start} · 截止点` : `${start} — ${localDateTime(time.endsAt, time.timeZone).replace("T", " ")}`;
+}
+function reliableTime(time: EventTime | undefined): time is EventTime {
+  if (!time) return false;
+  try {
+    if (time.kind === "date") { Temporal.PlainDate.from(time.onDate); return true; }
+    const start = Temporal.Instant.from(time.kind === "point" ? time.at : time.startsAt);
+    start.toZonedDateTimeISO(time.timeZone);
+    if (time.kind === "interval") {
+      const end = Temporal.Instant.from(time.endsAt);
+      end.toZonedDateTimeISO(time.timeZone);
+      return end.epochNanoseconds > start.epochNanoseconds;
+    }
+    return true;
+  } catch { return false; }
+}
+function intervalOverlaps(a: EventTime, b: EventTime) {
+  if (a.kind !== "interval" || b.kind !== "interval") return false;
+  const aStart = Date.parse(a.startsAt), aEnd = Date.parse(a.endsAt), bStart = Date.parse(b.startsAt), bEnd = Date.parse(b.endsAt);
+  return Number.isFinite(aStart) && Number.isFinite(aEnd) && Number.isFinite(bStart) && Number.isFinite(bEnd) && aStart < bEnd && bStart < aEnd;
+}
+
+export type CalendarProposalPreview = {
+  id: string;
+  proposal: Proposal;
+  title: string;
+  kind: CalendarItem["kind"];
+  time: EventTime;
+  location?: string;
+  evidence: string;
+  taskId?: string;
+  conflictsWith: CalendarItem[];
+};
+
+/** Pure projection for pending proposals; it never writes or resolves a proposal. */
+export function projectPendingProposals(proposals: Proposal[], items: CalendarItem[], tasks: CalendarTask[] = []): CalendarProposalPreview[] {
+  return proposals.flatMap((proposal) => {
+    if (proposal.state !== "pending" || (proposal.action !== "create" && proposal.action !== "update")) return [];
+    const target = proposal.targetId ? items.find((item) => item.id === proposal.targetId) : undefined;
+    const time = proposal.action === "create" ? proposal.event?.time : proposal.patch?.time ?? target?.time;
+    if (!reliableTime(time)) return [];
+    const title = proposal.action === "create" ? proposal.event?.title : proposal.patch?.title ?? target?.title ?? "待确认的活动";
+    if (!title?.trim()) return [];
+    const kind = proposal.action === "create" ? proposal.event?.kind ?? "activity" : target?.kind ?? "activity";
+    const location = proposal.action === "create" ? proposal.event?.location : proposal.patch?.location ?? target?.location;
+    const conflictsWith = time.kind === "interval" ? items.filter((item) => item.id !== proposal.targetId && item.status !== "cancelled" && item.status !== "ignored" && intervalOverlaps(time, item.time)) : [];
+    return [{ id: `proposal:${proposal.id}`, proposal, title, kind, time, location, evidence: proposal.evidence,
+      taskId: tasks.find((task) => task.proposalIds.includes(proposal.id))?.id, conflictsWith }];
+  });
 }
 function defaultForm() {
   const now = Temporal.Now.zonedDateTimeISO(ZONE).round({ smallestUnit: "hour", roundingMode: "ceil" });
@@ -47,7 +104,11 @@ export function CalendarPage() {
   const loadSequence = useRef(0);
   const [items, setItems] = useState<CalendarItem[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
+  const [agentTasks, setAgentTasks] = useState<CalendarTask[]>([]);
   const [selected, setSelected] = useState<CalendarItem>();
+  const [selectedPreview, setSelectedPreview] = useState<CalendarProposalPreview>();
+  const [focusRequest, setFocusRequest] = useState<CalendarFocusRequest>();
+  const focusRequestId = useRef(0);
   const [form, setForm] = useState(defaultForm);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -62,17 +123,24 @@ export function CalendarPage() {
     if (!requestedRange) return;
     const sequence = ++loadSequence.current;
     try {
-      const [events, pending] = await Promise.all([
+      const [events, pending, taskResult] = await Promise.all([
         request<{ events: CalendarItem[] }>(`/events?from=${encodeURIComponent(requestedRange.from)}&to=${encodeURIComponent(requestedRange.to)}`),
-        request<{ proposals: Proposal[] }>("/proposals")
+        request<{ proposals: Proposal[] }>("/proposals"),
+        request<{ tasks: CalendarTask[] }>("/agent/tasks").catch(() => ({ tasks: [] as CalendarTask[] }))
       ]);
       if (sequence !== loadSequence.current || currentRange.current?.from !== requestedRange.from || currentRange.current?.to !== requestedRange.to) return;
       setItems(events.events);
       setProposals(pending.proposals.filter((proposal) => proposal.state === "pending"));
+      setAgentTasks(taskResult.tasks);
       setError("");
     } catch (cause) { if (sequence === loadSequence.current) setError(cause instanceof Error ? cause.message : "读取日程失败"); }
   }, [range]);
-  useEffect(() => { void reload(); }, [reload]);
+  useEffect(() => {
+    void reload();
+    if (!range) return;
+    const timer = setInterval(() => { void reload(); }, 8000);
+    return () => clearInterval(timer);
+  }, [reload, range]);
 
   const visible = useMemo(() => items.filter((item) => item.status !== "cancelled" && item.status !== "ignored" &&
     `${item.title} ${item.location ?? ""}`.toLowerCase().includes(search.toLowerCase())), [items, search]);
@@ -89,19 +157,33 @@ export function CalendarPage() {
     return result;
   }, [items]);
   const visibleConflictCount = visible.filter((item) => conflicts.has(item.id)).length;
-  const events: EventInput[] = visible.map((item) => {
+  const proposalPreviews = useMemo(() => projectPendingProposals(proposals, items, agentTasks), [proposals, items, agentTasks]);
+  const visiblePreviews = proposalPreviews.filter((preview) => `${preview.title} ${preview.location ?? ""}`.toLowerCase().includes(search.toLowerCase()));
+  const formalEvents: EventInput[] = visible.map((item): EventInput => {
     const prefix = `${item.status === "tentative" ? "待确认 · " : ""}${conflicts.has(item.id) ? "重叠 · " : ""}`;
     const color = item.kind === "course" ? "#315eaa" : item.kind === "deadline" ? "#a54a30" : item.status === "tentative" ? "#8b6a23" : "#23634f";
-    if (item.time.kind === "date") return { id: item.id, title: `${prefix}${item.title}`, start: item.time.onDate, allDay: true, color };
+    const classNames = item.status === "tentative" ? ["calendar-tentative-event"] : [];
+    if (item.time.kind === "date") return { id: item.id, title: `${prefix}${item.title}`, start: item.time.onDate, allDay: true, color, classNames };
     if (item.time.kind === "point") {
       const local = dateTime(item.time.at);
-      return { id: item.id, title: `${prefix}截至 ${local.slice(11)} · ${item.title}`, start: local.slice(0, 10), allDay: true, color };
+      return { id: item.id, title: `${prefix}截至 ${local.slice(11)} · ${item.title}`, start: local.slice(0, 10), allDay: true, color, classNames };
     }
-    return { id: item.id, title: `${prefix}${item.title}`, start: item.time.startsAt, end: item.time.endsAt, color };
+    return { id: item.id, title: `${prefix}${item.title}`, start: item.time.startsAt, end: item.time.endsAt, color, classNames };
   });
+  const events: EventInput[] = formalEvents.concat(visiblePreviews.map((preview): EventInput => {
+    const conflictPrefix = preview.conflictsWith.length ? "冲突 · " : "";
+    const classNames = ["calendar-preview-event", ...(preview.conflictsWith.length ? ["calendar-preview-conflict"] : [])];
+    const color = preview.conflictsWith.length ? "#a54a30" : "#8b6a23";
+    if (preview.time.kind === "date") return { id: preview.id, title: `待确认 · ${conflictPrefix}${preview.title}`, start: preview.time.onDate, allDay: true, color, classNames };
+    if (preview.time.kind === "point") {
+      const local = localDateTime(preview.time.at, preview.time.timeZone);
+      return { id: preview.id, title: `待确认 · ${conflictPrefix}截至 ${local.slice(11)} · ${preview.title}`, start: local.slice(0, 10), allDay: true, color, classNames };
+    }
+    return { id: preview.id, title: `待确认 · ${conflictPrefix}${preview.title}`, start: preview.time.startsAt, end: preview.time.endsAt, color, classNames };
+  }));
 
   function edit(item?: CalendarItem) {
-    setSelected(item); setNotice(""); setError(""); submitOperation.current = undefined; cancelOperation.current = undefined;
+    setSelected(item); setSelectedPreview(undefined); setNotice(""); setError(""); submitOperation.current = undefined; cancelOperation.current = undefined;
     if (!item) { setForm(defaultForm()); return; }
     const fresh = defaultForm();
     setForm({ ...fresh, title: item.title, kind: item.kind, timeKind: item.time.kind, location: item.location ?? "",
@@ -162,6 +244,11 @@ export function CalendarPage() {
     } catch (cause) { setError(cause instanceof Error ? cause.message : "取消失败"); }
     finally { setBusy(false); }
   }
+  const handleCalendarChanged = useCallback(async () => {
+    setSelectedPreview(undefined);
+    setFocusRequest(undefined);
+    await reload();
+  }, [reload]);
 
   return <section className="calendar-page" aria-label="本地日程">
     <div className="calendar-toolbar">
@@ -175,7 +262,7 @@ export function CalendarPage() {
     {error && <p className="calendar-message error" role="alert">{error}</p>}
     {notice && <p className="calendar-message" role="status">{notice}</p>}
     <CourseImport onChanged={reload} />
-    <CalendarCommands onChanged={reload} />
+    <CalendarCommands focusRequest={focusRequest} onChanged={handleCalendarChanged} />
     <CalendarDeliveries />
     <div className="calendar-layout">
       <div className="calendar-grid">
@@ -187,10 +274,31 @@ export function CalendarPage() {
           views={{ nextSeven: { type: "timeGrid", duration: { days: 7 }, dateAlignment: "day" } }}
           slotMinTime="00:00:00" slotMaxTime="24:00:00" scrollTime="08:00:00" allDayText="截止 / 全天" displayEventEnd
           datesSet={(info) => setRange((old) => old?.from === info.startStr && old?.to === info.endStr ? old : { from: info.startStr, to: info.endStr })}
-          eventClick={(info) => edit(items.find((item) => item.id === info.event.id))} />
+          eventClick={(info) => {
+            const item = items.find((candidate) => candidate.id === info.event.id);
+            if (item) { edit(item); return; }
+            const preview = proposalPreviews.find((candidate) => candidate.id === info.event.id);
+            if (!preview) return;
+            setSelected(undefined); setSelectedPreview(preview); setNotice(""); setError("");
+          }} />
         <p className="calendar-help">{rolling ? "当前从今天起显示7天。" : "点击条目查看或修改。"}时间重叠会保留两项，截止点不占用课程时段。</p>
       </div>
-      <aside className="calendar-editor" aria-label={selected ? "编辑活动" : "新建活动"}>
+      <aside className="calendar-editor" aria-label={selectedPreview ? "待确认预览" : selected ? "编辑活动" : "新建活动"}>
+        {selectedPreview ? <>
+          <h3>待确认预览</h3>
+          <div className="calendar-preview-detail">
+            <strong>{selectedPreview.title}</strong>
+            <p>{labels[selectedPreview.kind]} · {previewTimeLabel(selectedPreview.time)}</p>
+            {selectedPreview.location && <p>地点：{selectedPreview.location}</p>}
+            <p className="calendar-preserve">依据：{selectedPreview.evidence}</p>
+            {selectedPreview.conflictsWith.length > 0 ? <div className="calendar-preview-conflicts"><strong>与已录入日程事实重叠</strong>
+              {selectedPreview.conflictsWith.map((item) => <p key={item.id}>{item.title} · {describe(item.time)}</p>)}
+            </div> : <p>本页已载入条目未发现时间段重叠；课表未核对完整时仍需人工确认。</p>}
+            <p className="calendar-help">这是暂存预览；确认前不会写入正式日历。</p>
+            {selectedPreview.taskId ? <button type="button" className="primary-button" onClick={() => setFocusRequest({ taskId: selectedPreview.taskId!, requestId: ++focusRequestId.current })}>打开对应任务的安全确认入口</button> :
+              <p className="calendar-help">此提案没有可定位的任务确认入口。</p>}
+          </div>
+        </> : <>
         <h3>{selected ? "活动详情" : "新建活动"}</h3>
         <form onSubmit={(event) => { void save(event); }}>
           <label>标题<input required maxLength={200} value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
@@ -222,6 +330,7 @@ export function CalendarPage() {
           <details><summary>来源记录编号</summary>{selected.sources.map((source) => <p key={`${source.kind}:${source.ref}`}>{source.ref}</p>)}</details></div>}
         {proposals.length > 0 && <div className="calendar-proposals"><h3>待处理变更 · {proposals.length}</h3>{proposals.map((proposal) => <article key={proposal.id}>
           <strong>待确认的日程变更</strong><p>{proposal.evidence}</p></article>)}</div>}
+        </>}
       </aside>
     </div>
   </section>;
