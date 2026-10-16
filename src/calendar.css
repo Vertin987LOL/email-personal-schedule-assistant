@@ -18,6 +18,17 @@
 .calendar-message { background: #e0eee7; border-radius: 8px; padding: 10px 14px; }
 .calendar-message.error { background: #fbe9de; color: #8c351c; }
 .calendar-proposals article { border-top: 1px solid var(--line); padding: 12px 0; font-size: 13px; }
+.course-import { margin: 0 0 16px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); font-size: 13px; }
+.course-import summary { cursor: pointer; font-weight: 600; }
+.course-import p, .course-import span { color: var(--muted); }
+.course-import form, .course-import label { display: flex; flex-direction: column; gap: 8px; }
+.course-import form { gap: 14px; margin: 16px 0; }
+.course-term, .course-row { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); }
+.course-row { padding: 14px 0; border-top: 1px solid var(--line); }
+.course-import input, .course-import select { width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--surface-strong); }
+.course-import .course-checkbox { flex-direction: row; align-items: center; }
+.course-checkbox input { width: auto; }
+.course-import button { width: fit-content; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
 .calendar-grid .fc { --fc-border-color: var(--line); --fc-today-bg-color: #edf4e5; font-size: 13px; }
 .calendar-grid .fc-toolbar-title { font-size: 18px; }
 .calendar-grid .fc-button { font-size: 12px; }

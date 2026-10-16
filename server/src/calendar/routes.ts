@@ -2,6 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import express from "express";
 import { requireAuth } from "../auth";
 import { CalendarError, CalendarService } from "./service";
+import { CourseCalendarService, type IcsImportOptions } from "./courses";
 
 export type CalendarRouterInput = DatabaseSync | CalendarService;
 
@@ -21,9 +22,36 @@ function stringQuery(value: unknown, field: string) {
 
 export function createCalendarRouter(input: CalendarRouterInput, ownerId = "local-owner") {
   const service = input instanceof CalendarService ? input : new CalendarService(input, ownerId);
+  const courses = new CourseCalendarService(service);
   const router = express.Router();
 
   router.use(requireAuth);
+
+  router.get("/courses", (_req, res, next) => {
+    try {
+      res.json({ series: courses.listSeries(), exceptions: courses.listExceptions(), proposals: courses.listImportProposals() });
+    } catch (error) { next(error); }
+  });
+
+  router.post("/courses/import", (req, res, next) => {
+    try {
+      const body = bodyObject(req.body);
+      if (body.series !== undefined) {
+        if (!Array.isArray(body.series) || body.ics !== undefined) throw new CalendarError("INVALID_INPUT", "provide series or ICS, not both");
+        res.json(courses.importSeries(body.operationKey, body.series));
+      } else {
+        const options = bodyObject(body.options);
+        res.json(courses.importIcs(body.operationKey, body.ics, options as IcsImportOptions));
+      }
+    } catch (error) { next(error); }
+  });
+
+  router.post("/courses/:id/occurrences/:date/exception", (req, res, next) => {
+    try {
+      const body = bodyObject(req.body);
+      res.json(courses.setOccurrenceException(body.operationKey, String(req.params.id), String(req.params.date), body.change, body.expectedEventVersion));
+    } catch (error) { next(error); }
+  });
 
   router.get("/events", (req, res, next) => {
     try {

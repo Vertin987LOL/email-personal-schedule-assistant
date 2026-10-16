@@ -227,6 +227,29 @@ test("HTTP router requires auth and returns the documented wrapped event/list sh
     const listedBody = await listedResponse.json() as { events: Array<{ id: string }>; conflicts: unknown[] };
     assert.equal(listedBody.events[0].id, createdBody.event.id);
     assert.ok(Array.isArray(listedBody.conflicts));
+
+    const series = [{
+      title: "线性代数", dayOfWeek: 2, localStart: "10:00", localEnd: "11:30", timeZone: "Asia/Shanghai",
+      termStart: "2026-10-19", termEnd: "2026-11-01", week1StartsOn: "2026-10-19",
+      teachingWeeks: [1, 2], importKey: "test-course", location: "T2-101"
+    }];
+    const importedResponse = await fetch(`${base}/api/calendar/courses/import`, {
+      method: "POST", headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ operationKey: "http-course", series })
+    });
+    assert.equal(importedResponse.status, 200);
+    const imported = await importedResponse.json() as { created: number; createdOccurrences: number };
+    assert.equal(imported.created, 1);
+    assert.equal(imported.createdOccurrences, 2);
+    const againResponse = await fetch(`${base}/api/calendar/courses/import`, {
+      method: "POST", headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ operationKey: "http-course-again", series })
+    });
+    const again = await againResponse.json() as { createdOccurrences: number };
+    assert.equal(again.createdOccurrences, 0);
+    const weekResponse = await fetch(`${base}/api/calendar/events?from=2026-10-19T00:00:00Z&to=2026-11-02T00:00:00Z`, { headers: { cookie } });
+    const week = await weekResponse.json() as { events: Array<{ kind: string }> };
+    assert.equal(week.events.filter((item) => item.kind === "course").length, 2);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     database.close();

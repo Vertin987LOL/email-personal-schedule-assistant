@@ -10,31 +10,12 @@ import "@fullcalendar/react/skeleton.css";
 import "@fullcalendar/react/themes/classic/theme.css";
 import "@fullcalendar/react/themes/classic/palette.css";
 import "./calendar.css";
+import { calendarRequest as request } from "./calendar-api";
+import { CourseImport } from "./CourseImport";
 
 const ZONE = "Asia/Shanghai";
-const BASE = import.meta.env.VITE_API_BASE_URL ?? (window.location.port === "5173" ? "http://127.0.0.1:8787" : "");
 const labels = { course: "课程", activity: "活动", deadline: "截止", time_block: "时间安排" };
 const statusLabels = { confirmed: "已确认", tentative: "待确认", cancelled: "已取消", ignored: "已忽略" };
-
-async function request<T>(path: string, method = "GET", body?: unknown): Promise<T> {
-  const response = await fetch(`${BASE}/api/calendar${path}`, {
-    method, credentials: "include", headers: { "Content-Type": "application/json" },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) })
-  });
-  const result = await response.json();
-  if (!response.ok) {
-    const messages: Record<string, string> = {
-      INVALID_TIME: "日期或时间不正确，请检查开始、结束和日期。",
-      INVALID_INPUT: "填写的信息不完整或不正确，请检查后再试。",
-      VERSION_CONFLICT: "活动已被修改，请刷新后重新打开，避免覆盖新内容。",
-      IDEMPOTENCY_CONFLICT: "这次提交的内容已改变，请重新打开活动后保存。",
-      NOT_FOUND: "活动已不存在或不可访问，请刷新。",
-      FORBIDDEN: "没有权限执行此操作。", STORAGE_FAILED: "保存暂时失败，请稍后重试。"
-    };
-    throw new Error(messages[result.error] ?? (typeof result.error === "string" ? result.error : "日程操作失败，请重试。"));
-  }
-  return result as T;
-}
 
 function dateTime(value: string) {
   return Temporal.Instant.from(value).toZonedDateTimeISO(ZONE).toPlainDateTime().toString({ smallestUnit: "minute" });
@@ -173,15 +154,16 @@ export function CalendarPage() {
     </div>
     {error && <p className="calendar-message error" role="alert">{error}</p>}
     {notice && <p className="calendar-message" role="status">{notice}</p>}
+    <CourseImport onChanged={reload} />
     <div className="calendar-layout">
       <div className="calendar-grid">
         <div className="calendar-filter"><input aria-label="搜索活动" placeholder="搜索活动或地点" value={search} onChange={(event) => setSearch(event.target.value)} />
           <span>{visibleConflictCount ? `${visibleConflictCount} 项与已录入日程重叠` : "本页已录入条目无重叠"} · 待确认用黄色显示</span></div>
         <FullCalendar ref={calendar} plugins={[timeGridPlugin, dayGridPlugin, classicThemePlugin]} locale={zhCn}
-          initialView="timeGridWeek" timeZone={ZONE} firstDay={1} nowIndicator height="auto" events={events}
+          initialView="timeGridWeek" timeZone={ZONE} firstDay={1} nowIndicator height={720} events={events}
           headerToolbar={{ start: "prev,next", center: "title", end: "timeGridWeek,timeGridDay,dayGridMonth" }}
           views={{ nextSeven: { type: "timeGrid", duration: { days: 7 }, dateAlignment: "day" } }}
-          slotMinTime="07:00:00" slotMaxTime="23:00:00" allDayText="截止 / 全天" displayEventEnd
+          slotMinTime="00:00:00" slotMaxTime="24:00:00" scrollTime="08:00:00" allDayText="截止 / 全天" displayEventEnd
           datesSet={(info) => setRange((old) => old?.from === info.startStr && old?.to === info.endStr ? old : { from: info.startStr, to: info.endStr })}
           eventClick={(info) => edit(items.find((item) => item.id === info.event.id))} />
         <p className="calendar-help">{rolling ? "当前从今天起显示7天。" : "点击条目查看或修改。"}时间重叠会保留两项，截止点不占用课程时段。</p>
@@ -204,6 +186,8 @@ export function CalendarPage() {
           {selected && <button type="button" disabled={busy} onClick={() => { void cancel(); }}>取消此活动</button>}
         </form>
         {selected && <div className="calendar-source"><strong>{labels[selected.kind]} · {statusLabels[selected.status]}</strong><p>{describe(selected.time)}</p><p>版本 {selected.version}</p>
+          {selected.seriesId && <p>当前修改仅影响这一次课，其他周次保留。</p>}
+          {selected.sourceEvidence && <p>原文依据：{selected.sourceEvidence}</p>}
           <p>来源：{selected.sources.map((source) => ({ manual: "手动录入", course: "课表", email: "邮件", plan: "排程" })[source.kind]).join("；")}</p>
           <details><summary>来源记录编号</summary>{selected.sources.map((source) => <p key={`${source.kind}:${source.ref}`}>{source.ref}</p>)}</details></div>}
         {proposals.length > 0 && <div className="calendar-proposals"><h3>待处理变更 · {proposals.length}</h3>{proposals.map((proposal) => <article key={proposal.id}>
