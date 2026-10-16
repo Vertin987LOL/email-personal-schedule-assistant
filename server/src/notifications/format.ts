@@ -1,4 +1,19 @@
-import type { MailCategory, Mailbox, ProcessedEmail } from "../types";
+import type {
+  EmailCalendarAnalysisStatus,
+  MailCategory,
+  Mailbox,
+  ProcessedEmail,
+  ProcessedEmailCalendarAnalysis
+} from "../types";
+
+export type EmailCalendarNotificationModel = {
+  status: EmailCalendarAnalysisStatus;
+  statusLabel: string;
+  taskId?: string;
+  deadlineAt?: string;
+  checkedAt?: string;
+  notes: string[];
+};
 
 export type EmailNotificationModel = {
   emailId: string;
@@ -12,6 +27,7 @@ export type EmailNotificationModel = {
   receivedAt: string;
   summary: string;
   actions: string[];
+  calendarAnalysis?: EmailCalendarNotificationModel;
 };
 
 function compact(value: string | undefined, maxLength: number, fallback: string) {
@@ -49,6 +65,30 @@ function categoryMeta(category: MailCategory) {
   return { categoryLabel: "不用管邮件", urgencyLabel: "仅作记录" };
 }
 
+function calendarStatusLabel(status: EmailCalendarAnalysisStatus) {
+  if (status === "ready") return "已完成核对";
+  if (status === "pending") return "等待核对";
+  if (status === "failed") return "核对失败";
+  return "未执行核对";
+}
+
+function calendarNotification(email: ProcessedEmail): EmailCalendarNotificationModel {
+  const source: ProcessedEmailCalendarAnalysis = email.calendarAnalysis ?? { state: "skipped" };
+  const rawNotes = Array.isArray(source.notes) ? source.notes : source.notes ? [source.notes] : [];
+  const notes = rawNotes
+    .flatMap((note) => String(note).replace(/\r\n?/g, "\n").split("\n"))
+    .map((note) => note.trim())
+    .filter(Boolean);
+  return {
+    status: source.state,
+    statusLabel: calendarStatusLabel(source.state),
+    ...(source.taskId ? { taskId: source.taskId } : {}),
+    ...(source.deadlineAt ? { deadlineAt: source.deadlineAt } : {}),
+    ...(source.checkedAt ? { checkedAt: source.checkedAt } : {}),
+    notes
+  };
+}
+
 export function buildEmailNotificationModel(email: ProcessedEmail, mailbox?: Mailbox): EmailNotificationModel {
   const meta = categoryMeta(email.category);
   const sender = email.fromName && email.fromAddress
@@ -66,7 +106,8 @@ export function buildEmailNotificationModel(email: ProcessedEmail, mailbox?: Mai
     summary: compactMarkdown(email.summaryZh, 1200, "暂无邮件分析。"),
     actions: email.actionItemsZh?.length
       ? email.actionItemsZh.slice(0, 5).map((item) => compactMarkdown(item, 260, ""))
-      : ["暂无明确动作，请打开邮件详情确认。"]
+      : ["暂无明确动作，请打开邮件详情确认。"],
+    calendarAnalysis: calendarNotification(email)
   };
 }
 
@@ -85,6 +126,10 @@ export function renderEmailNotification(model: EmailNotificationModel) {
     "",
     "完整分析",
     model.summary,
+    "",
+    "日程核对",
+    `状态：${model.calendarAnalysis?.statusLabel ?? "未执行核对"}`,
+    ...(model.calendarAnalysis?.notes ?? []).map((item) => `- ${item}`),
     "",
     "建议动作",
     ...model.actions.map((item, index) => `${index + 1}. ${item}`),

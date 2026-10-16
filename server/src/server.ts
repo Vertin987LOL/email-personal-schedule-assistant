@@ -8,11 +8,14 @@ import { CalendarService } from "./calendar/service";
 import { CalendarAgentRuntime } from "./calendar/agent-runtime";
 import { createCalendarAgentRouter } from "./calendar/agent-routes";
 import { resolveCalendarWechatCommand } from "./calendar/agent-wechat";
+import { readCalendarExecutorSettings, calendarExecutorFactory } from "./calendar/agent-settings";
+import { CalendarEmailBridge } from "./calendar/email-bridge";
 import { createCalendarWeclawInboundHandler } from "./weclaw/weclaw-inbound";
-import { startProcessingWorker } from "./email/processor";
+import { setCalendarEmailIntakeHandler, startProcessingWorker } from "./email/processor";
 import { startImapIdleWatchers } from "./email/imap-idle";
 import {
   scheduleNotificationDispatch,
+  setCalendarNotificationPreparation,
   stopNotificationDispatcher
 } from "./notifications/dispatcher";
 import { schedulePendingEmailNotificationRetry } from "./notifications/pending";
@@ -33,6 +36,8 @@ import { apiRateLimit, corsOrigin, csrfProtection, securityHeaders } from "./sec
 import {
   hasInterruptedRecoveryRetry,
   getAppDatabase,
+  getProcessedEmailById,
+  updateProcessedEmailCalendar,
   markInterruptedRuns,
   resumePausedNotificationDeliveries
 } from "./store";
@@ -45,8 +50,16 @@ const port = Number(process.env.PORT ?? 8787);
 
 const app = express();
 const calendar = new CalendarService(getAppDatabase());
-// A model executor is supplied only after its tool and filesystem isolation is verified.
-const calendarAgent = new CalendarAgentRuntime(calendar);
+// Missing or invalid local settings preserve manual calendar use and queued commands.
+let executorSettings: ReturnType<typeof readCalendarExecutorSettings>;
+try { executorSettings = readCalendarExecutorSettings(rootDir); } catch { console.warn("Calendar executor settings were rejected."); }
+let calendarEmail: CalendarEmailBridge;
+const calendarAgent = new CalendarAgentRuntime(calendar, executorSettings?.enabled
+  ? calendarExecutorFactory(executorSettings, rootDir, `http://127.0.0.1:${port}/api/calendar/agent-tools`) : undefined,
+  undefined, undefined, task => calendarEmail.settle(task));
+calendarEmail = new CalendarEmailBridge(calendarAgent, { readEmail: getProcessedEmailById, updateCalendar: updateProcessedEmailCalendar });
+setCalendarEmailIntakeHandler(email => calendarEmail.enqueue(email));
+setCalendarNotificationPreparation(email => calendarEmail.prepare(email));
 setWeclawInboundTextHandler(async message => {
   const account = readWeclawAccounts().find(item => item.botId === message.botId && item.recipientId === message.senderId);
   if (!account) return;

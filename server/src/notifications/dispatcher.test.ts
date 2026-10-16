@@ -9,7 +9,7 @@ import type {
   QqBotConfig
 } from "../types";
 import { QqApiError } from "../qq/types";
-import { NotificationDispatcher } from "./dispatcher";
+import { NotificationDispatcher, setCalendarNotificationPreparation } from "./dispatcher";
 
 const mailbox: Mailbox = {
   id: "mailbox-1",
@@ -218,4 +218,45 @@ test("a missing email pauses an orphaned delivery instead of retrying forever", 
 
   assert.equal(result.paused, 2);
   assert.equal(target.deliveries.every((item) => item.status === "paused"), true);
+});
+
+test("pending calendar analysis retries without sending or consuming an attempt", async () => {
+  const pending = { ...email, calendarAnalysis: { state: "pending" as const, notes: "正在核对" } };
+  const target = createHarness({ email: pending });
+  target.dispatcher.enqueueEmailNotifications(pending);
+  const result = await target.dispatcher.retryNotificationDeliveries();
+
+  assert.deepEqual(result, { attempted: 2, sent: 0, retried: 2, paused: 0, skipped: false });
+  assert.equal(target.sent.length, 0);
+  assert.equal(target.deliveries.every((item) => item.status === "retry" && item.attemptCount === 0), true);
+  assert.equal(Date.parse(target.deliveries[0].nextAttemptAt ?? ""), 1_786_838_405_000);
+});
+
+test("ready calendar analysis sends the notification once", async () => {
+  const ready = { ...email, calendarAnalysis: { state: "ready" as const, notes: "两场活动已逐项核对" } };
+  const target = createHarness({ email: ready });
+  target.dispatcher.enqueueEmailNotifications(ready);
+  const result = await target.dispatcher.retryNotificationDeliveries();
+
+  assert.equal(result.sent, 2);
+  assert.deepEqual(target.sent.sort(), ["qq", "wechat"]);
+  assert.equal(target.deliveries.every((item) => item.status === "sent" && item.attemptCount === 1), true);
+});
+
+test("calendar preparation errors retry with a redacted durable error", async () => {
+  setCalendarNotificationPreparation(() => {
+    throw new Error("private email body must never enter delivery state");
+  });
+  try {
+    const target = createHarness();
+    target.dispatcher.enqueueEmailNotifications(email);
+    const result = await target.dispatcher.retryNotificationDeliveries();
+    assert.equal(result.sent, 0);
+    assert.equal(result.retried, 2);
+    assert.equal(target.deliveries.every((item) => item.status === "retry" && item.attemptCount === 0), true);
+    assert.equal(target.deliveries.every((item) => item.lastError === "calendar_analysis_failed"), true);
+    assert.equal(target.sent.length, 0);
+  } finally {
+    setCalendarNotificationPreparation(undefined);
+  }
 });

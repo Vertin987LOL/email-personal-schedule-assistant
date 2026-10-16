@@ -334,6 +334,17 @@ export type MailCursor = {
   updatedAt: string;
 };
 
+export type EmailCalendarAnalysisStatus = "pending" | "ready" | "failed" | "skipped";
+
+/** Durable state for the calendar check attached to one processed email. */
+export type ProcessedEmailCalendarAnalysis = {
+  state: EmailCalendarAnalysisStatus;
+  taskId?: string;
+  deadlineAt?: string;
+  notes?: string;
+  checkedAt?: string;
+};
+
 export type ProcessedEmail = {
   id: string;
   mailboxId: string;
@@ -354,6 +365,7 @@ export type ProcessedEmail = {
   rawSource?: string;
   attachments?: EmailAttachment[];
   multimodalAnalysis?: MultimodalAnalysis;
+  calendarAnalysis?: ProcessedEmailCalendarAnalysis;
   panelRead?: boolean;
   panelReadAt?: string;
   readMarked: boolean;

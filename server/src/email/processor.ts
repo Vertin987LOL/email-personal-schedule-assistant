@@ -7,7 +7,6 @@ import {
   withMultimodalContext
 } from "../multimodal";
 import {
-  addProcessedEmail,
   addRun,
   commitFetched,
   commitProcessedEmailWithNotifications,
@@ -25,7 +24,12 @@ import {
   updateRun
 } from "../store";
 import { enqueueEmailNotifications, scheduleNotificationDispatch } from "../notifications/dispatcher";
-import type { Mailbox, ProcessedEmail, ProcessingRun } from "../types";
+import type {
+  Mailbox,
+  ProcessedEmail,
+  ProcessedEmailCalendarAnalysis,
+  ProcessingRun
+} from "../types";
 import { countUnreadImap, type FetchedEmail } from "./imap";
 import { MimeMailParser, type MailParser } from "./mail-parser";
 import {
@@ -50,6 +54,34 @@ export type ProcessorDependencies = {
   imapSummarizer?: Summarizer;
   countUnreadImap?: typeof countUnreadImap;
 };
+
+export type CalendarEmailIntakeHandler = (
+  email: ProcessedEmail
+) => ProcessedEmail | ProcessedEmailCalendarAnalysis | void;
+
+let calendarEmailIntakeHandler: CalendarEmailIntakeHandler | undefined;
+
+/**
+ * Install the synchronous calendar intake bridge. It is called only after
+ * the UID duplicate check and before the email row is inserted.
+ */
+export function setCalendarEmailIntakeHandler(handler?: CalendarEmailIntakeHandler) {
+  calendarEmailIntakeHandler = handler;
+}
+
+function prepareCalendarEmail(email: ProcessedEmail) {
+  if (!calendarEmailIntakeHandler) {
+    email.calendarAnalysis ??= { state: "skipped" };
+    return;
+  }
+  const result = calendarEmailIntakeHandler(email);
+  if (result && "state" in result && !("id" in result)) {
+    email.calendarAnalysis = result as ProcessedEmailCalendarAnalysis;
+  } else if (result && "id" in result) {
+    Object.assign(email, result);
+  }
+  email.calendarAnalysis ??= { state: "pending" };
+}
 
 let running = false;
 const queuedMailboxIds = new Set<string>();
@@ -242,7 +274,7 @@ export async function processMailboxes(options: {
         const notices = enqueueEmailNotifications(processedEmail, { bypassCategoryFilter: true });
         createdNotifications = notices.length;
         return createdNotifications;
-      });
+      }, () => prepareCalendarEmail(processedEmail));
       if (!inserted) return;
 
       enqueuedNotificationCount += createdNotifications;
@@ -398,7 +430,12 @@ export async function processMailboxes(options: {
         readMarked: false,
         readMarkNote: "已写入数据库，正在标记已读。"
       };
-      const insertedEmail = addProcessedEmail(processedEmail);
+      let createdNotifications = 0;
+      const insertedEmail = commitProcessedEmailWithNotifications(processedEmail, () => {
+        const notices = enqueueEmailNotifications(processedEmail);
+        createdNotifications = notices.length;
+        return createdNotifications;
+      }, () => prepareCalendarEmail(processedEmail));
       if (!insertedEmail) {
         try {
           await withTimeout(item.markRead(), 30000, "标记已读超时");
@@ -423,7 +460,7 @@ export async function processMailboxes(options: {
         currentEmailStepTotal: currentStepTotal
       });
 
-      enqueuedNotificationCount += enqueueEmailNotifications(insertedEmail).length;
+      enqueuedNotificationCount += createdNotifications;
 
       try {
         persistRun(run, {

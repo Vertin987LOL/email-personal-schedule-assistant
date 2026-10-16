@@ -40,13 +40,14 @@ export class CalendarAgentRuntime {
   readonly tasks: CalendarTaskStore;
   readonly tools: CalendarToolService;
   private active?: ActiveRun;
-  private pumping = false;
+  private pumping?: Promise<void>;
   private stopped = false;
   constructor(
     readonly calendar: CalendarService,
     private readonly factory?: CalendarExecutorFactory,
     private readonly budget = { calls: 12, milliseconds: 180_000 },
-    private readonly clock: () => number = Date.now
+    private readonly clock: () => number = Date.now,
+    private readonly onSettled?: (task: CalendarTask) => void | Promise<void>
   ) {
     const db = calendar.repository.db;
     this.tasks = new CalendarTaskStore(db, calendar.ownerId);
@@ -57,23 +58,24 @@ export class CalendarAgentRuntime {
       data TEXT NOT NULL, updatedAt TEXT NOT NULL, PRIMARY KEY(ownerId,id)
     )`);
   }
-  get status() { return { enabled: Boolean(this.factory), running: Boolean(this.active), reason: this.factory ? undefined : "执行端尚未通过隔离验收；指令可保存在本机，暂不执行。" }; }
+  get status() { return { enabled: Boolean(this.factory), running: Boolean(this.active), reason: this.factory ? undefined : "执行端尚未启用；指令可保存在本机，暂不执行。" }; }
   recover() {
     this.calendar.repository.db.prepare("UPDATE calendar_agent_runs SET state='interrupted' WHERE ownerId=? AND state='running'").run(this.calendar.ownerId);
     return this.tasks.recoverInterrupted();
   }
   schedule() { if (!this.stopped && this.factory) void this.pump().catch(() => { console.warn("Calendar task worker paused after a storage failure."); }); }
   async drain() { await this.pump(); }
-  private async pump() {
-    if (this.pumping || this.stopped || !this.factory) return;
-    this.pumping = true;
-    try {
+  private pump(): Promise<void> {
+    if (this.pumping) return this.pumping;
+    if (this.stopped || !this.factory) return Promise.resolve();
+    this.pumping = Promise.resolve().then(async () => {
       while (!this.stopped) {
         const task = this.tasks.listQueued(1)[0];
         if (!task) break;
         await this.execute(task);
       }
-    } finally { this.pumping = false; }
+    }).finally(() => { this.pumping = undefined; });
+    return this.pumping;
   }
   private persist(run: ActiveRun, state: string) {
     this.calendar.repository.db.prepare(`INSERT INTO calendar_agent_runs(ownerId,id,taskId,state,deadline,calls,data,updatedAt)
@@ -154,8 +156,8 @@ export class CalendarAgentRuntime {
         "固定课程/讲座重叠只报告精确时段；只有本人要求找空档才重新安排。没有工具回执不能声称已保存。",
         "变更只能提出提案等待本人确认；没有批准工具。缺信息调用 calendar.request_input 后停止。",
         `当前时刻 ${now}，本地时区 Asia/Shanghai。任务编号 ${task.id}。`,
-        `用户原始输入：\n${task.text}`,
-        ...task.inputs.map(input => `本人补充：\n${input.text}`)
+        `${task.sourceKind === "email" ? "宿主邮件分析任务（内含不可信邮件材料）" : "用户原始输入"}：\n${task.text}`,
+        ...task.inputs.map(input => `${task.sourceKind === "email" ? "邮件任务补充（仍受原任务权限约束）" : "本人补充"}：\n${input.text}`)
       ].join("\n\n");
       const result = await Promise.race([executor.run({ text, threadId: task.threadId,
         onThread: threadId => { this.tasks.update(task.id, { threadId }); },
@@ -164,7 +166,8 @@ export class CalendarAgentRuntime {
       if (!run.active || !result) return;
       if (result.status !== "completed") throw new Error("EXECUTOR_FAILED");
       const pending = run.proposals.filter(id => this.calendar.repository.getProposal(this.calendar.ownerId, id)?.state === "pending");
-      if (!run.receipts.some(receipt => receipt.result.ok)) throw new Error("NO_VERIFIABLE_RESULT");
+      // Email extraction is finalized against the calendar by the host, including mail with no activities.
+      if (task.sourceKind !== "email" && !run.receipts.some(receipt => receipt.result.ok)) throw new Error("NO_VERIFIABLE_RESULT");
       this.tasks.update(task.id, { state: pending.length ? "awaiting_confirmation" : "succeeded",
         result: { text: result.text.slice(0, 20_000), receipts: run.receipts }, proposalIds: run.proposals });
     } catch {
@@ -178,6 +181,9 @@ export class CalendarAgentRuntime {
       this.persist(run, this.tasks.get(task.id)?.state ?? "interrupted");
       await Promise.race([Promise.resolve(run.executor?.close()).catch(() => undefined), new Promise(resolve => { const timer = setTimeout(resolve, 2000); timer.unref(); })]);
       if (this.active === run) this.active = undefined;
+      const settled = this.tasks.get(task.id);
+      if (settled && settled.state !== "queued") await this.onSettled?.(settled);
+      this.persist(run, this.tasks.get(task.id)?.state ?? "interrupted");
     }
   }
   proposals(taskId: string) {

@@ -2021,6 +2021,14 @@ function EmailDetail({
           <MarkdownContent content={detail.summaryZh} />
         </section>
 
+        {detail.calendarAnalysis && (
+          <section className="summary-block">
+            <p className="section-kicker">日程核对</p>
+            <p style={{ whiteSpace: "pre-wrap" }}>{detail.calendarAnalysis.notes || "本次尚未完成课表核对。"}</p>
+            {detail.calendarAnalysis.taskId && <small>任务编号：{detail.calendarAnalysis.taskId}；可在日程指令页面查看及确认提案。</small>}
+          </section>
+        )}
+
         <section className="summary-block">
           <p className="section-kicker">判断理由</p>
           <MarkdownContent content={detail.reasonZh} />

@@ -4,7 +4,7 @@ import type { EmailNotificationModel } from "./format";
 
 const WIDTH = 1080;
 const MIN_HEIGHT = 1040;
-const MAX_HEIGHT = 1900;
+const MAX_HEIGHT = 3200;
 const PAD = 64;
 const CONTENT_WIDTH = WIDTH - PAD * 2;
 const CARD_RENDER_LIMIT = 2;
@@ -192,20 +192,42 @@ function metadata(label: string, value: string, x: number, y: number) {
   return `<text x="${x}" y="${y}" fill="#7B8882" font-size="22" font-weight="600">${label}</text><text x="${x + 104}" y="${y}" fill="#26312D" font-size="22" font-weight="600">${escapeXml(display)}</text>`;
 }
 
+function calendarCardContent(model: EmailNotificationModel) {
+  const calendar = model.calendarAnalysis;
+  const blocks: CardSummaryBlock[] = [{
+    kind: "paragraph",
+    lines: [`状态：${calendar?.statusLabel ?? "未执行核对"}`]
+  }];
+  for (const note of calendar?.notes ?? []) {
+    const lines = String(note)
+      .replace(/\r\n?/g, "\n")
+      .split("\n")
+      .flatMap((line) => wrapCardText(stripInlineMarkdown(line), 31, 100));
+    if (lines.length) blocks.push({ kind: "bullet", lines });
+  }
+  return blocks;
+}
+
 function layout(model: EmailNotificationModel) {
   const title = wrapCardText(stripInlineMarkdown(model.subject), 20, 3);
   const summary = parseCardSummary(model.summary);
+  const calendar = calendarCardContent(model);
   const actions = model.actions.slice(0, 3).map((item) => wrapCardText(stripInlineMarkdown(item), 31, 3));
   const highlights = extractNotificationHighlights(model);
   const summaryContentHeight = summary.reduce((sum, block, index) =>
     sum + block.lines.length * 40 + (index ? 12 : 0), 0);
   const summaryHeight = Math.max(96, summaryContentHeight + 54);
+  const calendarContentHeight = calendar.reduce((sum, block, index) =>
+    sum + block.lines.length * 40 + (index ? 12 : 0), 0);
+  const calendarHeight = Math.max(112, calendarContentHeight + 54);
   const actionHeight = actions.reduce((sum, lines) => sum + Math.max(76, lines.length * 38 + 32) + 14, 0);
-  const desired = 726 + Math.max(1, title.length) * 58 + (highlights.length ? 154 : 0) + summaryHeight + actionHeight;
+  const desired = 726 + Math.max(1, title.length) * 58 + (highlights.length ? 154 : 0) + summaryHeight + calendarHeight + 102 + actionHeight;
   return {
     title,
     summary,
     summaryHeight,
+    calendar,
+    calendarHeight,
     actions,
     highlights,
     height: Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, desired))
@@ -253,6 +275,21 @@ export function buildEmailNotificationCardSvg(model: EmailNotificationModel) {
     summaryTextY += block.lines.length * 40;
   });
   y = summaryY + card.summaryHeight + 48;
+  output.push(section("日程核对", PAD, y + 28, palette.accent));
+  const calendarY = y + 54;
+  output.push(`<rect x="${PAD}" y="${calendarY}" width="${CONTENT_WIDTH}" height="${card.calendarHeight}" rx="18" fill="#F4F6F4" stroke="${palette.line}"/>`);
+  let calendarTextY = calendarY + 46;
+  card.calendar.forEach((block, index) => {
+    if (index) calendarTextY += 12;
+    if (block.kind === "bullet") {
+      output.push(`<circle cx="${PAD + 32}" cy="${calendarTextY - 9}" r="5" fill="${palette.accent}"/>`);
+      output.push(text(block.lines, PAD + 54, calendarTextY, 26, 40, "#26312D", 580));
+    } else {
+      output.push(text(block.lines, PAD + 30, calendarTextY, 27, 40, "#26312D", 600));
+    }
+    calendarTextY += block.lines.length * 40;
+  });
+  y = calendarY + card.calendarHeight + 48;
   output.push(section("建议动作", PAD, y + 28, palette.accent));
   y += 58;
   card.actions.forEach((lines, index) => {

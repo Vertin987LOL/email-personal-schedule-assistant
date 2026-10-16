@@ -86,3 +86,16 @@ test("notification card preserves Markdown hierarchy without exposing syntax", (
   assert.doesNotMatch(svg, /\*\*/);
   assert.doesNotMatch(svg, /https:\/\/example\.com/);
 });
+
+test("notification card keeps multiple calendar notes in a separate block", () => {
+  const svg = buildEmailNotificationCardSvg(model({
+    calendarAnalysis: {
+      status: "ready",
+      statusLabel: "已完成核对",
+      notes: ["第一场与线性代数重叠15:00—16:00，共60分钟。", "第二场无重叠。"]
+    }
+  }));
+  assert.match(svg, /日程核对/);
+  assert.match(svg, /第一场与线性代数重叠15:00—16:00，共60分钟。/);
+  assert.match(svg, /第二场无重叠。/);
+});

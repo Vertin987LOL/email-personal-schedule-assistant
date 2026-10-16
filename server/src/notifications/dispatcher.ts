@@ -63,6 +63,16 @@ export type DeliveryBatchResult = {
   skipped: boolean;
 };
 
+export type CalendarNotificationPreparation = (
+  email: ProcessedEmail
+) => Promise<{ ready: boolean; email: ProcessedEmail }> | { ready: boolean; email: ProcessedEmail };
+
+let calendarNotificationPreparation: CalendarNotificationPreparation | undefined;
+
+export function setCalendarNotificationPreparation(handler?: CalendarNotificationPreparation) {
+  calendarNotificationPreparation = handler;
+}
+
 function safeError(error: unknown) {
   const value = error instanceof Error ? error.message : String(error);
   return value.replace(/\s+/g, " ").trim().slice(0, 240) || "notification_failed";
@@ -85,6 +95,13 @@ function shouldPause(error: unknown) {
     "未绑定",
     "接收人"
   ].some((marker) => message.includes(marker));
+}
+
+function calendarReady(email: ProcessedEmail) {
+  const status = email.calendarAnalysis?.state;
+  // Emails processed before the calendar bridge was installed, and explicitly
+  // skipped checks, retain the old notification behaviour.
+  return !status || status === "ready" || status === "skipped";
 }
 
 function defaultDependencies() {
@@ -139,6 +156,33 @@ export class NotificationDispatcher {
     return created;
   }
 
+  /**
+   * Gate delivery on the durable calendar-intake state. A pending or failed
+   * check is replayed shortly without consuming a send attempt.
+   */
+  async prepareEmail(delivery: NotificationDelivery, email: ProcessedEmail) {
+    try {
+      let prepared = email;
+      if (calendarNotificationPreparation) {
+        const result = await calendarNotificationPreparation(email);
+        prepared = result.email;
+        if (!result.ready) {
+          this.retryWithoutAttempt(delivery, "calendar_analysis_pending");
+          return { ready: false, email: prepared };
+        }
+      } else if (!calendarReady(prepared)) {
+        const status = prepared.calendarAnalysis?.state ?? "pending";
+        this.retryWithoutAttempt(delivery, `calendar_analysis_${status}`);
+        return { ready: false, email: prepared };
+      }
+      return { ready: true, email: prepared };
+    } catch (error) {
+      void error;
+      this.retryWithoutAttempt(delivery, "calendar_analysis_failed");
+      return { ready: false, email };
+    }
+  }
+
   async retryNotificationDeliveries(limit = DEFAULT_BATCH_LIMIT): Promise<DeliveryBatchResult> {
     if (this.running) return { attempted: 0, sent: 0, retried: 0, paused: 0, skipped: true };
     this.running = true;
@@ -155,12 +199,26 @@ export class NotificationDispatcher {
   }
 
   private async deliver(delivery: NotificationDelivery, result: DeliveryBatchResult) {
-    const email = this.dependencies.readEmail(delivery.emailId);
+    let email: ProcessedEmail | undefined;
+    try {
+      email = this.dependencies.readEmail(delivery.emailId);
+    } catch (error) {
+      void error;
+      this.retryWithoutAttempt(delivery, "calendar_analysis_failed");
+      result.retried += 1;
+      return;
+    }
     if (!email) {
       this.pause(delivery, "email_missing");
       result.paused += 1;
       return;
     }
+    const prepared = await this.prepareEmail(delivery, email);
+    if (!prepared.ready) {
+      result.retried += 1;
+      return;
+    }
+    email = prepared.email;
     const settings = this.dependencies.readChannelSettings()[delivery.channel];
     if (!settings.enabled || (!delivery.bypassCategoryFilter && !settings.notifyCategories[email.category])) {
       this.pause(delivery, "channel_or_category_disabled");
@@ -168,8 +226,8 @@ export class NotificationDispatcher {
       return;
     }
 
-    const model = buildEmailNotificationModel(email, this.dependencies.readMailbox(email.mailboxId));
     try {
+      const model = buildEmailNotificationModel(email, this.dependencies.readMailbox(email.mailboxId));
       if (delivery.channel === "wechat") {
         await this.dependencies.sendWechat(model, settings as NotificationSettings);
       } else {
@@ -211,6 +269,16 @@ export class NotificationDispatcher {
       nextAttemptAt: undefined,
       sentAt: undefined,
       lastError
+    });
+  }
+
+  private retryWithoutAttempt(delivery: NotificationDelivery, lastError: string) {
+    this.dependencies.updateDelivery(delivery.id, {
+      status: "retry",
+      attemptCount: delivery.attemptCount,
+      nextAttemptAt: new Date(this.dependencies.now() + BASE_RETRY_MS).toISOString(),
+      sentAt: undefined,
+      lastError: safeError(lastError)
     });
   }
 }

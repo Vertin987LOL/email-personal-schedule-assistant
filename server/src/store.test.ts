@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { resolveAiProtocol } from "./ai-protocol";
+import { CalendarTaskStore } from "./calendar/agent-tasks";
 import type { AiSettings, ProcessedEmail } from "./types";
 
 process.env.DATA_DIR ??= path.join(tmpdir(), `auto-email-system-store-test-${process.pid}`);
@@ -59,6 +60,7 @@ const {
   commitFetched,
   commitProcessedEmailWithNotifications,
   fetchedMailExternalUid,
+  getAppDatabase,
   getProcessedEmailById,
   updateState,
   undoProcessedEmailsPanelRead
@@ -898,6 +900,40 @@ test("processed email and notification enqueue roll back together", () => {
     return 1;
   });
   assert.equal(inserted?.externalUid, email.externalUid);
+  assert.equal(listNotificationDeliveries({ emailId: email.id }).length, 1);
+});
+
+test("calendar task, processed email, and notification roll back as one transaction", () => {
+  const suffix = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const email = makeStoreEmail({ id: `calendar-atomic-email-${suffix}`, mailboxId: `calendar-atomic-mailbox-${suffix}` });
+  email.externalUid = JSON.stringify(["local-owner", "INBOX", "42", "9"]);
+  const sourceKey = `email:calendar-atomic-${suffix}`;
+  const tasks = new CalendarTaskStore(getAppDatabase());
+  let taskId = "";
+  const prepare = () => {
+    const task = tasks.create({ sourceKey, sourceKind: "email", sourceRef: email.id, text: "extract calendar facts" });
+    taskId = task.id;
+    email.calendarAnalysis = { state: "pending", taskId };
+  };
+
+  assert.throws(() => {
+    commitProcessedEmailWithNotifications(email, () => {
+      enqueueNotificationDelivery(email.id, "qq");
+      throw new Error("synthetic three-way commit failure");
+    }, prepare);
+  }, /synthetic three-way commit failure/);
+  assert.equal(getProcessedEmailById(email.id), undefined);
+  assert.equal(tasks.getBySourceKey(sourceKey), undefined);
+  assert.equal(listNotificationDeliveries({ emailId: email.id }).length, 0);
+
+  const inserted = commitProcessedEmailWithNotifications(email, () => {
+    enqueueNotificationDelivery(email.id, "qq");
+    return 1;
+  }, prepare);
+  assert.equal(inserted?.calendarAnalysis?.state, "pending");
+  assert.equal(inserted?.calendarAnalysis?.taskId, taskId);
+  assert.equal(tasks.getBySourceKey(sourceKey)?.id, taskId);
+  assert.equal(getProcessedEmailById(email.id)?.calendarAnalysis?.taskId, taskId);
   assert.equal(listNotificationDeliveries({ emailId: email.id }).length, 1);
 });
 

@@ -378,6 +378,37 @@ export class CalendarService {
     return event;
   }
 
+  attachSource(eventId: string, expectedVersionInput: unknown, operationKeyInput: unknown, rawSource: unknown): CalendarEvent {
+    const operationKey = ensureOperationKey(operationKeyInput);
+    const expectedVersion = this.expectedVersion(expectedVersionInput);
+    const source = validateSource(rawSource, "source");
+    const hash = payloadHash({ eventId, expectedVersion, source });
+    return this.repository.withTransaction(() => {
+      const existing = this.repository.getOperation(this.ownerId, operationKey);
+      if (existing) {
+        this.assertOperation(existing, "event:attach-source", hash);
+        return operationResult<CalendarEvent>(existing);
+      }
+      const current = this.requireEvent(eventId);
+      this.assertVersion(current, expectedVersion);
+      const alreadyAttached = current.sources.some((item) => item.kind === source.kind && item.ref === source.ref);
+      const event = alreadyAttached
+        ? current
+        : { ...current, sources: [...current.sources, source], version: current.version + 1 };
+      const now = nowIso();
+      if (event !== current) this.repository.updateEvent(event, now);
+      this.repository.putOperation({
+        ownerId: this.ownerId,
+        operationKey,
+        operationType: "event:attach-source",
+        payloadHash: hash,
+        resultJson: JSON.stringify(event),
+        resultId: event.id
+      }, now);
+      return event;
+    });
+  }
+
   cancelEvent(id: string, expectedVersionInput: unknown, operationKeyInput: unknown): CalendarEvent {
     const operationKey = ensureOperationKey(operationKeyInput);
     const expectedVersion = this.expectedVersion(expectedVersionInput);

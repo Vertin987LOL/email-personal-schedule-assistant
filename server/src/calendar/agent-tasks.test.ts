@@ -83,6 +83,27 @@ test("recovery only interrupts this owner's running tasks", () => {
   assert.equal(second.get(secondTask.id)?.state, "running");
 });
 
+test("nested task transactions use a savepoint and preserve the outer transaction", () => {
+  const database = new DatabaseSync(":memory:");
+  const target = new CalendarTaskStore(database);
+  const withTransaction = (target as unknown as { withTransaction<T>(work: () => T): T }).withTransaction.bind(target);
+
+  database.exec("BEGIN IMMEDIATE");
+  assert.throws(
+    () => withTransaction(() => {
+      target.create({ sourceKey: "nested-rollback", sourceKind: "manual", text: "inner" });
+      throw new Error("nested failure");
+    }),
+    /nested failure/
+  );
+  assert.equal(database.isTransaction, true);
+  assert.equal(target.getBySourceKey("nested-rollback"), undefined);
+
+  target.create({ sourceKey: "outer-commit", sourceKind: "manual", text: "outer" });
+  database.exec("COMMIT");
+  assert.equal(target.getBySourceKey("outer-commit")?.text, "outer");
+});
+
 test("wechat task source references are structured and stable", () => {
   const ref = wechatTaskSourceRef("bot-1", "user-1");
   assert.equal(ref, "wechat:bot-1:user-1");

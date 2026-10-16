@@ -32,6 +32,7 @@ import type {
   NotificationSettings,
   EmailNotificationStatusSummary,
   ProcessedEmail,
+  ProcessedEmailCalendarAnalysis,
   ProcessingRun,
   PublicQqBotSettings,
   QqBotBinding,
@@ -1404,7 +1405,8 @@ export function addProcessedEmail(email: ProcessedEmail) {
 // commit together with the processed email, or both remain pending for replay.
 export function commitProcessedEmailWithNotifications(
   email: ProcessedEmail,
-  enqueue: () => number
+  enqueue: () => number,
+  prepare?: () => void
 ): ProcessedEmail | undefined {
   db.exec("BEGIN IMMEDIATE");
   let inserted: ProcessedEmail | undefined;
@@ -1419,6 +1421,10 @@ export function commitProcessedEmailWithNotifications(
     if (db.prepare("SELECT 1 FROM emails WHERE id = ? LIMIT 1").get(email.id)) {
       throw new Error("processed email ID already belongs to another message");
     }
+    // Intake hooks run after duplicate checks but before the email row and its
+    // notification outbox entries are inserted, so their state is atomic with
+    // the email commit and replaying a duplicate cannot create a second task.
+    prepare?.();
     insertEmail(email);
     enqueue();
     db.exec("COMMIT");
@@ -1429,6 +1435,18 @@ export function commitProcessedEmailWithNotifications(
   }
   publishAppEvent("email", { id: email.id, mailboxId: email.mailboxId, category: email.category });
   return inserted;
+}
+
+export function updateProcessedEmailCalendar(
+  id: string,
+  calendarAnalysis: ProcessedEmailCalendarAnalysis
+) {
+  const email = getProcessedEmailById(id);
+  if (!email) return undefined;
+  email.calendarAnalysis = clone(calendarAnalysis);
+  insertEmail(email);
+  publishAppEvent("email", { id, mailboxId: email.mailboxId, category: email.category });
+  return email;
 }
 
 function updateEmailByLookup(mailboxId: string, externalUid: string, mutator: (email: ProcessedEmail) => void) {

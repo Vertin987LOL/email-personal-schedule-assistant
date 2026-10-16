@@ -379,6 +379,7 @@ export type EmailListPage = {
 };
 
 export type ProcessedEmail = EmailListItem & {
+  calendarAnalysis?: { state: "pending" | "ready" | "failed" | "skipped"; taskId?: string; deadlineAt?: string; notes?: string; checkedAt?: string };
   messageId?: string;
   toText?: string;
   assetToken?: string;

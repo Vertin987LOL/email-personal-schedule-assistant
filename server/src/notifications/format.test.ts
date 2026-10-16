@@ -41,3 +41,17 @@ test("notification model preserves structured Markdown line breaks", () => {
 
   assert.equal(model.summary, structured.summaryZh);
 });
+
+test("calendar notes render in their own section without summary truncation", () => {
+  const structured = email("important");
+  structured.summaryZh = "邮件摘要";
+  structured.calendarAnalysis = {
+    state: "ready",
+    notes: "第一场与线性代数重叠15:00—16:00，共60分钟。\n第二场无重叠。"
+  };
+  const message = renderEmailNotification(buildEmailNotificationModel(structured));
+  assert.match(message, /日程核对\n状态：已完成核对/);
+  assert.match(message, /第一场与线性代数重叠15:00—16:00，共60分钟。/);
+  assert.match(message, /第二场无重叠。/);
+  assert.ok(message.indexOf("日程核对") > message.indexOf("完整分析"));
+});
