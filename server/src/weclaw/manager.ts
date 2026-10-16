@@ -20,6 +20,15 @@ type WeclawState = {
 const state: WeclawState = {};
 let qrLogMode = false;
 let contextReadyHandler: ((userId: string) => void | Promise<void>) | undefined;
+export type WeclawInboundText = {
+  botId: string;
+  senderId: string;
+  messageId: string;
+  text: string;
+  receivedAt: string;
+};
+export type WeclawInboundTextHandler = (message: WeclawInboundText) => void | Promise<void>;
+let inboundTextHandler: WeclawInboundTextHandler | undefined;
 const rootDir = path.resolve(process.cwd());
 const toolDir = path.join(rootDir, "tools", "weclaw");
 const logDir = path.join(rootDir, "data");
@@ -211,6 +220,10 @@ export type WeclawAccount = {
 
 export function setWeclawContextReadyHandler(handler: (userId: string) => void | Promise<void>) {
   contextReadyHandler = handler;
+}
+
+export function setWeclawInboundTextHandler(handler?: WeclawInboundTextHandler) {
+  inboundTextHandler = handler;
 }
 
 function executableName() {
@@ -846,8 +859,65 @@ function textFromIlinkMessage(msg: any) {
   return String(item?.text_item?.text || "");
 }
 
+function receivedAtFromIlinkMessage(msg: any) {
+  const value = msg?.create_time ?? msg?.create_time_ms ?? msg?.timestamp;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const milliseconds = value > 10_000_000_000 ? value : value * 1000;
+    const date = new Date(milliseconds);
+    if (Number.isFinite(date.getTime())) return date.toISOString();
+  }
+  if (typeof value === "string" && Number.isFinite(Date.parse(value))) return new Date(value).toISOString();
+  return new Date().toISOString();
+}
+
+export function deriveWeclawInboundMessageId(msg: any, botId: string, senderId: string, text: string) {
+  const direct = [msg?.msg_id, msg?.message_id, msg?.client_msg_id, msg?.id]
+    .find((value) => typeof value === "string" || typeof value === "number");
+  if (direct !== undefined && String(direct).trim()) return String(direct);
+  const stableSource = JSON.stringify({
+    botId,
+    senderId,
+    text,
+    messageType: msg?.message_type,
+    messageState: msg?.message_state,
+    // Keep protocol timestamps when present so identical text from separate
+    // messages does not collapse into one task. If the protocol omits both
+    // identity and time, identical content is conservatively treated as a replay.
+    create_time: msg?.create_time,
+    create_time_ms: msg?.create_time_ms,
+    timestamp: msg?.timestamp,
+    itemList: msg?.item_list
+  });
+  return `sha256:${createHash("sha256").update(stableSource).digest("hex")}`;
+}
+
 function isUserFinishedMessage(msg: any) {
   return msg?.message_type === 1 && msg?.message_state === 2;
+}
+
+export async function processWeclawInboundBatch(
+  messages: unknown[],
+  account: Pick<WeclawCredentialRecord, "botId" | "recipientId">,
+  handler: WeclawInboundTextHandler
+) {
+  const persisted: WeclawInboundText[] = [];
+  for (const candidate of messages) {
+    const msg = candidate as any;
+    if (!isUserFinishedMessage(msg)) continue;
+    if (String(msg?.from_user_id || "") !== account.recipientId) continue;
+    const text = textFromIlinkMessage(msg);
+    if (!text.trim()) continue;
+    const inbound: WeclawInboundText = {
+      botId: account.botId,
+      senderId: account.recipientId,
+      messageId: deriveWeclawInboundMessageId(msg, account.botId, account.recipientId, text),
+      text,
+      receivedAt: receivedAtFromIlinkMessage(msg)
+    };
+    await handler(inbound);
+    persisted.push(inbound);
+  }
+  return persisted;
 }
 
 async function monitorAccount(account: WeclawCredentialRecord, signal: AbortSignal) {
@@ -888,23 +958,26 @@ async function monitorAccount(account: WeclawCredentialRecord, signal: AbortSign
         continue;
       }
 
-      if (response?.get_updates_buf) {
-        getUpdatesBuf = response.get_updates_buf;
-        writeSyncBuf(account.botId, getUpdatesBuf);
-      }
-
       const messages = Array.isArray(response?.msgs) ? response.msgs : [];
+      if (inboundTextHandler) {
+        await processWeclawInboundBatch(messages, account, inboundTextHandler);
+      }
       for (const msg of messages) {
         if (!isUserFinishedMessage(msg)) continue;
+        if (String(msg?.from_user_id || "") !== account.recipientId) continue;
         if (msg.context_token && msg.from_user_id) {
           const refreshedAt = new Date().toISOString();
           const changed = writeWeclawContextToken(msg.from_user_id, msg.context_token);
           appendLog(
             "system",
-            `recorded WeChat context for ${msg.from_user_id} (${changed ? "new token" : "same token"}); incoming text ignored: ${textFromIlinkMessage(msg).slice(0, 60)}`
+            `recorded WeChat context for ${msg.from_user_id} (${changed ? "new token" : "same token"})`
           );
           void notifyWeclawContextTokenUpdated(msg.from_user_id, refreshedAt, changed);
         }
+      }
+      if (response?.get_updates_buf) {
+        getUpdatesBuf = response.get_updates_buf;
+        writeSyncBuf(account.botId, getUpdatesBuf);
       }
     } catch (error) {
       if (signal.aborted) break;

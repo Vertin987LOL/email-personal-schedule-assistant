@@ -35,3 +35,15 @@
 .calendar-grid .fc-timegrid-event { border-radius: 5px; }
 @media (max-width: 1150px) { .calendar-layout { grid-template-columns: 1fr; } .calendar-editor { max-width: 700px; width: 100%; } }
 @media (max-width: 700px) { .calendar-grid { padding: 8px; overflow-x: auto; } .calendar-grid .fc { min-width: 620px; } .calendar-filter { min-width: 0; } .calendar-actions { gap: 6px; } }
+.calendar-commands { margin: 12px 0; padding: 14px; border: 1px solid #dce4df; border-radius: 12px; background: white; }
+.calendar-commands summary { cursor: pointer; font-weight: 600; }
+.calendar-commands label { display: grid; gap: 6px; margin: 10px 0; }
+.calendar-commands textarea { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #cfd9d3; border-radius: 8px; font: inherit; }
+.calendar-command-layout { display: grid; grid-template-columns: minmax(160px, 1fr) 2fr; gap: 14px; margin-top: 12px; }
+.calendar-task-list { display: grid; gap: 6px; align-content: start; max-height: 400px; overflow: auto; }
+.calendar-task-list button { display: grid; text-align: left; gap: 5px; }
+.calendar-task-list small { color: #56685c; }
+.calendar-task-list [aria-pressed="true"] { background: #e6f1eb; }
+.calendar-preserve { white-space: pre-wrap; overflow-wrap: anywhere; }
+.calendar-proposal { border: 1px solid #d5dfd8; border-radius: 8px; padding: 10px; margin: 10px 0; }
+@media (max-width: 700px) { .calendar-command-layout { grid-template-columns: 1fr; } .calendar-task-list { max-height: 180px; } }

@@ -4,6 +4,11 @@ import cors from "cors";
 import express from "express";
 import router from "./routes";
 import { createCalendarRouter } from "./calendar/routes";
+import { CalendarService } from "./calendar/service";
+import { CalendarAgentRuntime } from "./calendar/agent-runtime";
+import { createCalendarAgentRouter } from "./calendar/agent-routes";
+import { resolveCalendarWechatCommand } from "./calendar/agent-wechat";
+import { createCalendarWeclawInboundHandler } from "./weclaw/weclaw-inbound";
 import { startProcessingWorker } from "./email/processor";
 import { startImapIdleWatchers } from "./email/imap-idle";
 import {
@@ -19,6 +24,8 @@ import {
 import {
   defaultWeclawApiUrl,
   ensureWeclawStarted,
+  readWeclawAccounts,
+  setWeclawInboundTextHandler,
   setWeclawContextReadyHandler,
   startWeclawTokenReminderWorker
 } from "./weclaw/manager";
@@ -37,6 +44,18 @@ const distDir = path.join(rootDir, "dist");
 const port = Number(process.env.PORT ?? 8787);
 
 const app = express();
+const calendar = new CalendarService(getAppDatabase());
+// A model executor is supplied only after its tool and filesystem isolation is verified.
+const calendarAgent = new CalendarAgentRuntime(calendar);
+setWeclawInboundTextHandler(async message => {
+  const account = readWeclawAccounts().find(item => item.botId === message.botId && item.recipientId === message.senderId);
+  if (!account) return;
+  await createCalendarWeclawInboundHandler(calendarAgent.tasks, {
+    botId: account.botId, recipientId: account.recipientId,
+    onCommand: input => resolveCalendarWechatCommand(calendarAgent, input),
+    onQueued: () => calendarAgent.schedule()
+  })(message);
+});
 
 setWeclawContextReadyHandler(() => {
   resumePausedNotificationDeliveries("wechat");
@@ -49,7 +68,8 @@ app.use(securityHeaders);
 app.use(cors({ origin: corsOrigin, credentials: true, methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] }));
 app.use(express.json({ limit: "10mb", strict: true }));
 app.use("/api", apiRateLimit, csrfProtection);
-app.use("/api/calendar", createCalendarRouter(getAppDatabase()));
+app.use("/api/calendar", createCalendarAgentRouter(calendarAgent));
+app.use("/api/calendar", createCalendarRouter(calendar));
 app.use("/api", router);
 app.use(
   express.static(distDir, {
@@ -68,6 +88,8 @@ app.get(/.*/, (_req, res) => {
 });
 
 const httpServer = app.listen(port, "127.0.0.1", () => {
+  calendarAgent.recover();
+  calendarAgent.schedule();
   const retryInterruptedRecovery = hasInterruptedRecoveryRetry();
   const interruptedCount = markInterruptedRuns();
   startProcessingWorker({ recoverInterruptedOnFirstRun: interruptedCount > 0 || retryInterruptedRecovery });
@@ -89,6 +111,7 @@ async function shutdown(signal: string) {
   console.log("Received " + signal + "; stopping notification workers.");
   stopNotificationDispatcher();
   stopQqMarkdownAssetCleanupWorker();
+  await calendarAgent.close().catch(() => undefined);
   await stopQqManager().catch(() => undefined);
 
   const forceExit = setTimeout(() => process.exit(1), 10_000);

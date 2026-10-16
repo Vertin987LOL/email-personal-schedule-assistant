@@ -12,6 +12,7 @@ import "@fullcalendar/react/themes/classic/palette.css";
 import "./calendar.css";
 import { calendarRequest as request } from "./calendar-api";
 import { CourseImport } from "./CourseImport";
+import { CalendarCommands } from "./CalendarCommands";
 
 const ZONE = "Asia/Shanghai";
 const labels = { course: "课程", activity: "活动", deadline: "截止", time_block: "时间安排" };
@@ -155,6 +156,7 @@ export function CalendarPage() {
     {error && <p className="calendar-message error" role="alert">{error}</p>}
     {notice && <p className="calendar-message" role="status">{notice}</p>}
     <CourseImport onChanged={reload} />
+    <CalendarCommands onChanged={reload} />
     <div className="calendar-layout">
       <div className="calendar-grid">
         <div className="calendar-filter"><input aria-label="搜索活动" placeholder="搜索活动或地点" value={search} onChange={(event) => setSearch(event.target.value)} />

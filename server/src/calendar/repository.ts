@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { randomUUID } from "node:crypto";
 import type {
   CalendarEvent,
   CalendarEventStatus,
@@ -91,14 +92,16 @@ export class CalendarRepository {
   }
 
   withTransaction<T>(work: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
+    const nested = this.db.isTransaction;
+    const savepoint = `calendar_${randomUUID().replace(/-/g, "")}`;
+    this.db.exec(nested ? `SAVEPOINT ${savepoint}` : "BEGIN IMMEDIATE");
     try {
       const value = work();
-      this.db.exec("COMMIT");
+      this.db.exec(nested ? `RELEASE SAVEPOINT ${savepoint}` : "COMMIT");
       return value;
     } catch (error) {
       try {
-        this.db.exec("ROLLBACK");
+        this.db.exec(nested ? `ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint}` : "ROLLBACK");
       } catch {
         // Keep the original failure; rollback is best effort after SQLite errors.
       }
