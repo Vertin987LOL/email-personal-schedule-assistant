@@ -460,6 +460,17 @@ export function resolveWeclawRecipientId(fallback = "") {
   return fallback.trim() || readWeclawAccounts()[0]?.recipientId || "";
 }
 
+/** Readiness only; callers never receive the context token or credential file. */
+export function isWeclawRecipientReady(recipientId: string) {
+  if (!readWeclawAccounts().some(account => account.recipientId === recipientId)) return false;
+  const store = readWeclawContextTokens();
+  const token = store.tokens[recipientId];
+  const metadata = token ? tokenMetadataFor(store, recipientId, token) : undefined;
+  return deriveWeclawTokenHealth({ hasToken: Boolean(token), capturedAt: metadata?.captured_at,
+    observedAt: metadata?.observed_at, verifiedAt: metadata?.verified_at,
+    failedAt: metadata?.failed_at, lastError: metadata?.last_error }).contextReady;
+}
+
 function appendLog(source: string, chunk: Buffer | string) {
   fs.mkdirSync(logDir, { recursive: true });
   const text = String(chunk);

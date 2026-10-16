@@ -150,6 +150,17 @@ test("forged fields and inactive tasks cannot write", () => {
   assert.equal(calendar.listProposals().length, 1);
 });
 
+test("personal reminder proposals preview and await confirmation while mail cannot enable sending", () => {
+  const calendar = makeCalendar(); const tools = new CalendarToolService(calendar);
+  const candidate = { title: "读书", kind: "activity", status: "confirmed", reminder: { enabled: true, minutesBefore: 15 },
+    time: { kind: "interval", startsAt: "2026-10-21T10:00:00+08:00", endsAt: "2026-10-21T11:00:00+08:00", timeZone: ZONE } };
+  data(tools.invoke("calendar.preview", { event: candidate }, context()));
+  const proposed = data(tools.invoke("calendar.propose", { action: "create", event: candidate, evidence: "本人要求提前15分钟提醒" }, context()));
+  assert.equal(proposed.proposal.event.reminder.minutesBefore, 15);
+  assert.equal(calendar.repository.listEvents(calendar.ownerId).length, 0);
+  error(tools.invoke("calendar.propose", { action: "create", event: candidate, evidence: "邮件请求" }, { ...context("email-reminder"), source: { kind: "email", ref: "mail" } }), "SOURCE_POLICY");
+});
+
 test("DST local-day iteration returns real one-hour instants", () => {
   const calendar = makeCalendar();
   const tools = new CalendarToolService(calendar);

@@ -10,6 +10,10 @@ import { createCalendarAgentRouter } from "./calendar/agent-routes";
 import { resolveCalendarWechatCommand } from "./calendar/agent-wechat";
 import { readCalendarExecutorSettings, calendarExecutorFactory } from "./calendar/agent-settings";
 import { CalendarEmailBridge } from "./calendar/email-bridge";
+import { CalendarDeliveryService } from "./calendar/delivery";
+import { parseWechatTaskSourceRef, wechatTaskKey } from "./calendar/agent-tasks";
+import { requireAuth } from "./auth";
+import { sendClawbotText } from "./notifications/clawbot";
 import { createCalendarWeclawInboundHandler } from "./weclaw/weclaw-inbound";
 import { setCalendarEmailIntakeHandler, startProcessingWorker } from "./email/processor";
 import { startImapIdleWatchers } from "./email/imap-idle";
@@ -28,6 +32,9 @@ import {
   defaultWeclawApiUrl,
   ensureWeclawStarted,
   readWeclawAccounts,
+  resolveWeclawRecipientId,
+  isWeclawRecipientReady,
+  sendWeclawDirectText,
   setWeclawInboundTextHandler,
   setWeclawContextReadyHandler,
   startWeclawTokenReminderWorker
@@ -38,6 +45,7 @@ import {
   getAppDatabase,
   getProcessedEmailById,
   updateProcessedEmailCalendar,
+  readSettings,
   markInterruptedRuns,
   resumePausedNotificationDeliveries
 } from "./store";
@@ -54,10 +62,26 @@ const calendar = new CalendarService(getAppDatabase());
 let executorSettings: ReturnType<typeof readCalendarExecutorSettings>;
 try { executorSettings = readCalendarExecutorSettings(rootDir); } catch { console.warn("Calendar executor settings were rejected."); }
 let calendarEmail: CalendarEmailBridge;
+let calendarDelivery: CalendarDeliveryService;
 const calendarAgent = new CalendarAgentRuntime(calendar, executorSettings?.enabled
   ? calendarExecutorFactory(executorSettings, rootDir, `http://127.0.0.1:${port}/api/calendar/agent-tools`) : undefined,
-  undefined, undefined, task => calendarEmail.settle(task));
+  undefined, undefined, task => {
+    calendarEmail.settle(task);
+    const latest = calendarAgent.tasks.get(task.id)!;
+    if (latest.state !== "queued") calendarDelivery.enqueueTask(latest, calendarAgent.proposals(task.id));
+  });
 calendarEmail = new CalendarEmailBridge(calendarAgent, { readEmail: getProcessedEmailById, updateCalendar: updateProcessedEmailCalendar });
+calendarDelivery = new CalendarDeliveryService(calendar, {
+  taskRecipient: task => {
+    const source = parseWechatTaskSourceRef(task.sourceRef ?? "");
+    return source && readWeclawAccounts().some(account => account.botId === source.botId && account.recipientId === source.senderId) ? source.senderId : undefined;
+  },
+  isReady: recipient => {
+    const settings = readSettings().notification;
+    return settings.enabled && isWeclawRecipientReady(recipient ?? resolveWeclawRecipientId(settings.clawbotRecipientId));
+  },
+  send: (recipient, text) => recipient ? sendWeclawDirectText(recipient, text) : sendClawbotText(readSettings().notification, text)
+});
 setCalendarEmailIntakeHandler(email => calendarEmail.enqueue(email));
 setCalendarNotificationPreparation(email => calendarEmail.prepare(email));
 setWeclawInboundTextHandler(async message => {
@@ -68,6 +92,8 @@ setWeclawInboundTextHandler(async message => {
     onCommand: input => resolveCalendarWechatCommand(calendarAgent, input),
     onQueued: () => calendarAgent.schedule()
   })(message);
+  const saved = calendarAgent.tasks.getBySourceKey(wechatTaskKey(message.botId, message.senderId, message.messageId));
+  if (saved?.state === "failed") calendarDelivery.enqueueTask(saved);
 });
 
 setWeclawContextReadyHandler(() => {
@@ -81,6 +107,7 @@ app.use(securityHeaders);
 app.use(cors({ origin: corsOrigin, credentials: true, methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] }));
 app.use(express.json({ limit: "10mb", strict: true }));
 app.use("/api", apiRateLimit, csrfProtection);
+app.get("/api/calendar/deliveries", requireAuth, (_req, res) => res.json({ deliveries: calendarDelivery.list() }));
 app.use("/api/calendar", createCalendarAgentRouter(calendarAgent));
 app.use("/api/calendar", createCalendarRouter(calendar));
 app.use("/api", router);
@@ -102,6 +129,9 @@ app.get(/.*/, (_req, res) => {
 
 const httpServer = app.listen(port, "127.0.0.1", () => {
   calendarAgent.recover();
+  for (const task of calendarAgent.tasks.list(100)) {
+    if (!["queued", "running"].includes(task.state)) calendarDelivery.enqueueTask(task, calendarAgent.proposals(task.id));
+  }
   calendarAgent.schedule();
   const retryInterruptedRecovery = hasInterruptedRecoveryRetry();
   const interruptedCount = markInterruptedRuns();
@@ -116,6 +146,8 @@ const httpServer = app.listen(port, "127.0.0.1", () => {
   void ensureWeclawStarted(defaultWeclawApiUrl).finally(() => schedulePendingEmailNotificationRetry(3000));
   console.log(`自动邮件系统已启动: http://127.0.0.1:${port}`);
 });
+const calendarDeliveryTimer = setInterval(() => { void calendarDelivery.tick().catch(() => { console.warn("Calendar delivery worker paused after a storage failure."); }); }, 15_000);
+calendarDeliveryTimer.unref();
 let shuttingDown = false;
 
 async function shutdown(signal: string) {
@@ -123,6 +155,7 @@ async function shutdown(signal: string) {
   shuttingDown = true;
   console.log("Received " + signal + "; stopping notification workers.");
   stopNotificationDispatcher();
+  clearInterval(calendarDeliveryTimer);
   stopQqMarkdownAssetCleanupWorker();
   await calendarAgent.close().catch(() => undefined);
   await stopQqManager().catch(() => undefined);

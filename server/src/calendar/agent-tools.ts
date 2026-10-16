@@ -189,7 +189,7 @@ function eventCandidate(value: unknown, source?: CalendarToolContext["source"], 
   const input = object(value, "event");
   fields(input, allowMetadata
     ? ["title", "kind", "time", "location", "status", "reminder", "sourceEvidence", "seriesId"]
-    : ["title", "kind", "time", "location"], "event");
+    : ["title", "kind", "time", "location", "status", "reminder"], "event");
   const result: CandidateEvent & Partial<Pick<CalendarEventInput, "sources">> = {
     title: text(input.title, "event.title", MAX_TITLE),
     kind: enumValue(input.kind, "event.kind", ["course", "activity", "deadline", "time_block"] as const),
@@ -507,8 +507,8 @@ export class CalendarToolService {
       if (input.event === undefined) fail("INVALID_INPUT", "create proposal needs an event", "ask_user");
       const rawEvent = object(input.event, "event");
       if (ctx.source.kind !== "plan") {
-        if (rawEvent.seriesId !== undefined || rawEvent.reminder !== undefined || rawEvent.sourceEvidence !== undefined) {
-          fail("SOURCE_POLICY", "this proposal source cannot supply seriesId, reminder, or sourceEvidence", "stop");
+        if (rawEvent.seriesId !== undefined || rawEvent.sourceEvidence !== undefined || (ctx.source.kind === "email" && rawEvent.reminder !== undefined)) {
+          fail("SOURCE_POLICY", "this proposal source cannot supply host metadata or email-triggered reminders", "stop");
         }
         if (rawEvent.kind === "course") fail("SOURCE_POLICY", "course events must come from the course importer", "stop");
       }

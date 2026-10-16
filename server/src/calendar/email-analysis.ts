@@ -566,7 +566,14 @@ export function renderEmailCalendarAnalysis(analysis: EmailCalendarAnalysis): st
     else if (activity.status === "existing") lines.push(`${label}：已匹配本模块已有邮件日程。`);
     else lines.push(`${label}：已生成可撤销的暂定日程。`);
     if (activity.overlaps.length) {
-      for (const overlap of activity.overlaps) lines.push(`  冲突：${overlap.title}${overlap.status === "tentative" ? "（暂定）" : "（已确认）"}，${overlap.overlapStart}—${overlap.overlapEnd}，${overlap.overlapMinutes} 分钟。`);
+      const timeZone = activity.time?.timeZone ?? activity.knownStart?.timeZone ?? "Asia/Shanghai";
+      const local = (at: string) => Temporal.Instant.from(at).toZonedDateTimeISO(timeZone).toPlainDateTime().toString({ smallestUnit: "minute" }).replace("T", " ");
+      for (const overlap of activity.overlaps) {
+        const other = `${overlap.title}${overlap.status === "tentative" ? "（暂定）" : "（已确认）"}`;
+        if (activity.kind === "activity" && (activity.knownStart || activity.time?.kind === "point") && activity.time?.kind !== "interval") {
+          lines.push(`  开始时刻冲突：${local(overlap.overlapStart)} 落在${other}期间；结束时间未知，无法计算完整重叠时长。`);
+        } else lines.push(`  冲突：${other}，${local(overlap.overlapStart)}—${local(overlap.overlapEnd)}，${overlap.overlapMinutes} 分钟（${timeZone}）。`);
+      }
     } else if (activity.status !== "needs_details" && activity.status !== "needs_review") {
       lines.push("  当前记录未发现重叠；完整课表未核对。");
     }

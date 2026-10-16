@@ -61,6 +61,7 @@ const eventSchema = strictObject({
   time: timeSchema,
   location: z.string().optional(),
   status: z.enum(["confirmed", "tentative", "cancelled", "ignored"]).optional(),
+  reminder: reminderSchema.optional(),
 });
 const patchSchema = strictObject({
   title: z.string().optional(),

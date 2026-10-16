@@ -139,6 +139,8 @@ test("N6: date deadline is materialized, while an activity with only a start nee
   assert.equal(result.activities[1].status, "needs_details");
   assert.equal(result.activities[1].eventId, undefined);
   assert.equal(result.activities[1].overlaps[0].overlapMinutes, 0);
+  assert.match(renderEmailCalendarAnalysis(result), /2026-10-22 14:00.*结束时间未知/);
+  assert.doesNotMatch(renderEmailCalendarAnalysis(result), /0 分钟/);
 });
 
 test("N7: analysis never claims the calendar is free", () => {

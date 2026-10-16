@@ -37,6 +37,11 @@
 @media (max-width: 700px) { .calendar-grid { padding: 8px; overflow-x: auto; } .calendar-grid .fc { min-width: 620px; } .calendar-filter { min-width: 0; } .calendar-actions { gap: 6px; } }
 .calendar-commands { margin: 12px 0; padding: 14px; border: 1px solid #dce4df; border-radius: 12px; background: white; }
 .calendar-commands summary { cursor: pointer; font-weight: 600; }
+.calendar-deliveries { margin: 12px 0; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-strong); }
+.calendar-deliveries summary { cursor: pointer; font-weight: 600; }
+.calendar-deliveries ul { padding-left: 20px; max-height: 450px; overflow-y: auto; }
+.calendar-deliveries li { margin: 12px 0; overflow-wrap: anywhere; }
+.calendar-deliveries li p { margin: 6px 0; }
 .calendar-commands label { display: grid; gap: 6px; margin: 10px 0; }
 .calendar-commands textarea { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #cfd9d3; border-radius: 8px; font: inherit; }
 .calendar-command-layout { display: grid; grid-template-columns: minmax(160px, 1fr) 2fr; gap: 14px; margin-top: 12px; }

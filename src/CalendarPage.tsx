@@ -13,6 +13,7 @@ import "./calendar.css";
 import { calendarRequest as request } from "./calendar-api";
 import { CourseImport } from "./CourseImport";
 import { CalendarCommands } from "./CalendarCommands";
+import { CalendarDeliveries } from "./CalendarDeliveries";
 
 const ZONE = "Asia/Shanghai";
 const labels = { course: "课程", activity: "活动", deadline: "截止", time_block: "时间安排" };
@@ -34,7 +35,8 @@ function defaultForm() {
   return { title: "", kind: "activity" as CalendarItem["kind"], timeKind: "interval" as EventTime["kind"],
     start: now.toPlainDateTime().toString({ smallestUnit: "minute" }),
     end: now.add({ hours: 1 }).toPlainDateTime().toString({ smallestUnit: "minute" }),
-    date: now.toPlainDate().toString(), location: "", status: "confirmed" as "confirmed" | "tentative" };
+    date: now.toPlainDate().toString(), location: "", status: "confirmed" as "confirmed" | "tentative",
+    reminderEnabled: false, reminderMode: "minutes" as "minutes" | "at", reminderMinutesBefore: "15", reminderAt: "" };
 }
 
 export function CalendarPage() {
@@ -104,6 +106,10 @@ export function CalendarPage() {
     const fresh = defaultForm();
     setForm({ ...fresh, title: item.title, kind: item.kind, timeKind: item.time.kind, location: item.location ?? "",
       status: item.status === "tentative" ? "tentative" : "confirmed",
+      reminderEnabled: item.reminder?.enabled ?? false,
+      reminderMode: item.reminder?.at ? "at" : "minutes",
+      reminderMinutesBefore: item.reminder?.minutesBefore === undefined ? fresh.reminderMinutesBefore : String(item.reminder.minutesBefore),
+      reminderAt: item.reminder?.at ? dateTime(item.reminder.at) : "",
       ...(item.time.kind === "date" ? { date: item.time.onDate } :
         { start: dateTime(item.time.kind === "point" ? item.time.at : item.time.startsAt),
           ...(item.time.kind === "interval" ? { end: dateTime(item.time.endsAt) } : {}) }) });
@@ -114,7 +120,20 @@ export function CalendarPage() {
       const time: EventTime = form.timeKind === "date" ? { kind: "date", onDate: form.date, timeZone: ZONE } :
         form.timeKind === "point" ? { kind: "point", at: instant(form.start), timeZone: ZONE } :
           { kind: "interval", startsAt: instant(form.start), endsAt: instant(form.end), timeZone: ZONE };
-      const fields = { title: form.title.trim(), kind: form.kind, time, location: form.location.trim(), status: form.status };
+      let reminder: { enabled: boolean; minutesBefore?: number; at?: string } = { enabled: false };
+      if (form.reminderEnabled) {
+        if (form.timeKind === "date" || form.reminderMode === "at") {
+          if (!form.reminderAt) throw new Error("启用指定时刻提醒时必须选择明确提醒时刻");
+          reminder = { enabled: true, at: instant(form.reminderAt) };
+        } else {
+          const minutesBeforeText = form.reminderMinutesBefore.trim();
+          if (!/^\d+$/.test(minutesBeforeText)) throw new Error("提醒提前分钟数必须是非负整数");
+          const minutesBefore = Number(minutesBeforeText);
+          if (!Number.isSafeInteger(minutesBefore) || minutesBefore > 1_000_000) throw new Error("提醒提前分钟数超出范围");
+          reminder = { enabled: true, minutesBefore };
+        }
+      }
+      const fields = { title: form.title.trim(), kind: form.kind, time, location: form.location.trim(), status: form.status, reminder };
       const content = JSON.stringify({ id: selected?.id, version: selected?.version, fields });
       if (submitOperation.current?.content !== content) submitOperation.current = { content, key: crypto.randomUUID() };
       const operationKey = submitOperation.current.key;
@@ -157,6 +176,7 @@ export function CalendarPage() {
     {notice && <p className="calendar-message" role="status">{notice}</p>}
     <CourseImport onChanged={reload} />
     <CalendarCommands onChanged={reload} />
+    <CalendarDeliveries />
     <div className="calendar-layout">
       <div className="calendar-grid">
         <div className="calendar-filter"><input aria-label="搜索活动" placeholder="搜索活动或地点" value={search} onChange={(event) => setSearch(event.target.value)} />
@@ -184,6 +204,14 @@ export function CalendarPage() {
           </>}
           <label>地点<input value={form.location} maxLength={300} onChange={(event) => setForm({ ...form, location: event.target.value })} /></label>
           <label>状态<select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value as "confirmed" | "tentative" })}><option value="confirmed">已确认</option><option value="tentative">待确认</option></select></label>
+          <label><input type="checkbox" checked={form.reminderEnabled} onChange={(event) => setForm({ ...form, reminderEnabled: event.target.checked })} /> 启用提醒</label>
+          {form.reminderEnabled && (form.timeKind === "date" ? <label>明确提醒时刻（必填）<input type="datetime-local" required value={form.reminderAt} onChange={(event) => setForm({ ...form, reminderAt: event.target.value })} /></label> : <>
+            <label>提醒方式<select value={form.reminderMode} onChange={(event) => setForm({ ...form, reminderMode: event.target.value as "minutes" | "at" })}>
+              <option value="minutes">提前分钟</option><option value="at">指定时刻</option>
+            </select></label>
+            {form.reminderMode === "at" ? <label>明确提醒时刻（必填）<input type="datetime-local" required value={form.reminderAt} onChange={(event) => setForm({ ...form, reminderAt: event.target.value })} /></label> :
+              <label>提前提醒（分钟）<input required type="number" min="0" step="1" value={form.reminderMinutesBefore} onChange={(event) => setForm({ ...form, reminderMinutesBefore: event.target.value })} /></label>}
+          </>)}
           <button className="primary-button" disabled={busy}>{busy ? "保存中…" : selected ? "保存修改" : "添加到日历"}</button>
           {selected && <button type="button" disabled={busy} onClick={() => { void cancel(); }}>取消此活动</button>}
         </form>

@@ -95,7 +95,12 @@ export class CalendarAgentRuntime {
     if (!task) throw new CalendarError("NOT_FOUND", "task not found", 404);
     if (this.active?.task.id === taskId) this.abort(this.active, "CANCELLED");
     else if (["queued", "interrupted", "needs_input", "awaiting_confirmation"].includes(task.state)) this.tasks.update(taskId, { state: "cancelled" });
-    return this.tasks.get(taskId);
+    const cancelled = this.tasks.get(taskId);
+    if (cancelled && this.active?.task.id !== taskId) this.notifySettled(cancelled);
+    return cancelled;
+  }
+  private notifySettled(task: CalendarTask) {
+    void Promise.resolve().then(() => this.onSettled?.(task)).catch(() => { console.warn("Calendar task result could not be finalized."); });
   }
   invoke(token: string, name: string, args: unknown): ToolResult {
     const run = this.active;
@@ -216,6 +221,7 @@ export class CalendarAgentRuntime {
     });
     const remaining = this.proposals(taskId).some(item => item.proposal.state === "pending");
     this.tasks.update(taskId, { state: remaining ? "awaiting_confirmation" : "succeeded", result: { text: remaining ? "部分提案已处理，其余待确认。" : "提案已处理。", resolution: result } });
+    this.notifySettled(this.tasks.get(taskId)!);
     return result;
   }
   async close() {
