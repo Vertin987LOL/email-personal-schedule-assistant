@@ -59,7 +59,13 @@ export function formatMailNotices(
   recipientRef: string
 ): NoticeFormatterResult<Notice[]> {
   if (!recipientRef.trim()) return invalid("通知接收人未配置");
-  if (summary.key.ownerId !== mail.key.ownerId || summary.key.mailboxId !== mail.key.mailboxId || summary.key.uid !== mail.key.uid) {
+  if (
+    summary.key.ownerId !== mail.key.ownerId ||
+    summary.key.mailboxId !== mail.key.mailboxId ||
+    summary.key.folder !== mail.key.folder ||
+    summary.key.uidValidity !== mail.key.uidValidity ||
+    summary.key.uid !== mail.key.uid
+  ) {
     return invalid("摘要与邮件键不匹配");
   }
 
