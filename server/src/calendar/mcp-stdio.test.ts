@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertCalendarGatewayUrl, callCalendarGateway, CALENDAR_GATEWAY_URL_ENV, CALENDAR_CAPABILITY_TOKEN_ENV } from "./mcp-stdio";
+import { assertCalendarGatewayUrl, callCalendarGateway, CALENDAR_GATEWAY_URL_ENV, CALENDAR_CAPABILITY_TOKEN_ENV, CALENDAR_TOOL_ANNOTATIONS, CALENDAR_TOOL_NAMES, createCalendarMcpServer } from "./mcp-stdio";
 
 const gatewayUrl = "http://127.0.0.1:8787/api/calendar/agent-tools";
 
@@ -59,4 +59,17 @@ test("MCP rejects unknown fields and the native interaction tool", async () => {
 test("MCP entrypoint names are environment-only configuration", () => {
   assert.equal(CALENDAR_GATEWAY_URL_ENV, "CALENDAR_GATEWAY_URL");
   assert.equal(CALENDAR_CAPABILITY_TOKEN_ENV, "CALENDAR_CAPABILITY_TOKEN");
+});
+
+test("MCP registers the seven calendar tools with truthful annotations", () => {
+  const server = createCalendarMcpServer({ gatewayUrl, capabilityToken: "capability-token" });
+  const tools = (server as unknown as { _registeredTools: Record<string, { annotations?: unknown }> })._registeredTools;
+  assert.deepEqual(Object.keys(tools), [...CALENDAR_TOOL_NAMES]);
+  assert.deepEqual(tools["calendar.list"].annotations, CALENDAR_TOOL_ANNOTATIONS["calendar.list"]);
+  assert.deepEqual(tools["calendar.get"].annotations, CALENDAR_TOOL_ANNOTATIONS["calendar.get"]);
+  assert.deepEqual(tools["calendar.find_slots"].annotations, CALENDAR_TOOL_ANNOTATIONS["calendar.find_slots"]);
+  assert.deepEqual(tools["calendar.preview"].annotations, CALENDAR_TOOL_ANNOTATIONS["calendar.preview"]);
+  assert.deepEqual(tools["calendar.propose"].annotations, CALENDAR_TOOL_ANNOTATIONS["calendar.propose"]);
+  assert.deepEqual(tools["calendar.get_operation"].annotations, CALENDAR_TOOL_ANNOTATIONS["calendar.get_operation"]);
+  assert.deepEqual(tools["calendar.request_input"].annotations, CALENDAR_TOOL_ANNOTATIONS["calendar.request_input"]);
 });

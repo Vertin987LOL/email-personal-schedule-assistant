@@ -1,7 +1,7 @@
 import { spawn as nodeSpawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
-import { assertCalendarGatewayUrl } from "./mcp-stdio";
+import { assertCalendarGatewayUrl, CALENDAR_TOOL_NAMES } from "./mcp-stdio";
 
 export type CodexProviderConfig = {
   providerId: string;
@@ -21,10 +21,15 @@ export type CodexHostConfig = {
   model: string;
   /** Structured provider allowlist. Raw TOML is deliberately unsupported. */
   providerToml?: CodexProviderConfig;
+  /** Use the built-in official OpenAI route; mutually exclusive with providerToml. */
+  builtinOpenai?: boolean;
+  /** Optional source auth file. It is copied once to the isolated home. */
+  authFile?: string;
   gatewayUrl: string;
   capabilityToken: string;
   mcpScript: string;
   timeoutMs?: number;
+  effort?: string;
   providerEnv?: Record<string, string>;
 };
 
@@ -53,6 +58,7 @@ type JsonRpcMessage = {
 };
 
 type SpawnedProcess = {
+  readonly pid?: number;
   stdin: { write(value: string): boolean; end(): void };
   stdout: { on(event: "data", listener: (chunk: string | Buffer) => void): unknown; setEncoding?: (encoding: BufferEncoding) => void };
   stderr: { on(event: "data", listener: (chunk: string | Buffer) => void): unknown; setEncoding?: (encoding: BufferEncoding) => void };
@@ -68,6 +74,8 @@ type Spawn = (command: string, args: string[], options: {
   stdio: ["pipe", "pipe", "pipe"];
 }) => SpawnedProcess;
 
+type SpawnTaskkill = (command: string, args: string[], options: { windowsHide: boolean; stdio: "ignore" }) => unknown;
+
 type Pending = { resolve: (value: JsonRpcMessage) => void; reject: (error: Error) => void };
 type Outcome = { status: "completed" | "failed" | "interrupted"; error?: string };
 type RunContext = {
@@ -75,7 +83,10 @@ type RunContext = {
   turnId: string;
   input: CodexHostRunInput;
   textByItem: Map<string, string>;
+  phaseByItem: Map<string, string>;
+  completedAgentItems: string[];
   fallbackText: string;
+  finalText?: string;
   outcome?: Outcome;
   resolveOutcome: (outcome: Outcome) => void;
   outcomePromise: Promise<Outcome>;
@@ -84,6 +95,7 @@ type RunContext = {
 };
 
 const DEFAULT_TIMEOUT_MS = 180_000;
+const CLOSE_GRACE_MS = 500;
 function tomlString(value: string) {
   return JSON.stringify(value);
 }
@@ -98,57 +110,79 @@ function textFromTurn(turn: Record<string, unknown> | undefined, context: RunCon
   for (const item of items) {
     if (!item || typeof item !== "object") continue;
     const value = item as Record<string, unknown>;
-    if (value.type === "agentMessage" && typeof value.id === "string" && typeof value.text === "string") context.textByItem.set(value.id, value.text);
+    if (value.type !== "agentMessage" || typeof value.id !== "string") continue;
+    const itemId = value.id;
+    if (typeof value.phase === "string") context.phaseByItem.set(itemId, value.phase);
+    if (typeof value.text === "string") context.textByItem.set(itemId, value.text);
+    if (!context.completedAgentItems.includes(itemId)) context.completedAgentItems.push(itemId);
   }
-  const collected = [...context.textByItem.values()].join("");
-  return collected || context.fallbackText;
+  const finalMessages = context.completedAgentItems
+    .filter(id => context.phaseByItem.get(id) === "final_answer")
+    .map(id => context.textByItem.get(id) ?? "")
+    .filter(Boolean);
+  if (finalMessages.length) return finalMessages.join("");
+  const completedMessages = context.completedAgentItems
+    .map(id => context.textByItem.get(id) ?? "")
+    .filter(Boolean);
+  return completedMessages.at(-1) || context.fallbackText;
 }
 
 /** Build the isolated CODEX_HOME config. It intentionally contains no user config or credential file. */
 export function buildCodexConfig(config: CodexHostConfig) {
   const provider = config.providerToml;
-  if (!provider || typeof provider !== "object") throw new Error("structured providerToml is required; isolated execution is disabled");
+  const builtinOpenai = config.builtinOpenai === true;
+  if (builtinOpenai && provider !== undefined) throw new Error("builtinOpenai and providerToml are mutually exclusive");
+  if (!builtinOpenai && (!provider || typeof provider !== "object")) throw new Error("structured providerToml is required; isolated execution is disabled");
   if (!isAbsolute(config.homeDir) || !isAbsolute(config.workDir) || !isAbsolute(config.mcpScript)) throw new Error("workDir, homeDir and mcpScript must be absolute paths");
+  if (config.authFile !== undefined && (!config.authFile || !isAbsolute(config.authFile))) throw new Error("authFile must be an absolute path");
+  if (config.effort !== undefined && (typeof config.effort !== "string" || !/^\S{1,32}$/.test(config.effort))) throw new Error("effort is invalid");
   assertCalendarGatewayUrl(config.gatewayUrl);
-  if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(provider.providerId)) throw new Error("providerId is invalid");
-  let baseUrl: URL;
-  try { baseUrl = new URL(provider.baseUrl); } catch { throw new Error("provider baseUrl is invalid"); }
-  if (!(baseUrl.protocol === "http:" || baseUrl.protocol === "https:") || baseUrl.username || baseUrl.password || baseUrl.search || baseUrl.hash) throw new Error("provider baseUrl is invalid");
-  if (provider.envKey !== undefined && !/^[A-Z_][A-Z0-9_]*$/.test(provider.envKey)) throw new Error("provider envKey is invalid");
-  if (provider.requiresOpenaiAuth !== undefined && typeof provider.requiresOpenaiAuth !== "boolean") throw new Error("requiresOpenaiAuth is invalid");
-  const requestMaxRetries = provider.requestMaxRetries ?? 0;
-  const streamMaxRetries = provider.streamMaxRetries ?? 0;
-  if (![requestMaxRetries, streamMaxRetries].every(value => Number.isInteger(value) && value >= 0 && value <= 3)) throw new Error("provider retry limits are invalid");
-  const providerName = provider.name ?? provider.providerId;
-  if (typeof providerName !== "string" || providerName.length === 0 || providerName.length > 200) throw new Error("provider name is invalid");
-  const wireApi = provider.wireApi ?? "responses";
-  if (wireApi !== "responses" && wireApi !== "chat") throw new Error("provider wireApi is invalid");
-  const envKey = provider.envKey ?? (provider.requiresOpenaiAuth ? "OPENAI_API_KEY" : undefined);
   // app-server may run with an empty cwd; a bare `tsx` loader would then fail module resolution.
   const scriptArgs = /\.ts$/i.test(config.mcpScript) ? ["--import", import.meta.resolve("tsx"), config.mcpScript] : [config.mcpScript];
   const hostControls = [
     `model = ${tomlString(config.model)}`,
-    `model_provider = ${tomlString(provider.providerId)}`,
+    `model_provider = ${tomlString(builtinOpenai ? "openai" : provider!.providerId)}`,
     'approval_policy = "never"',
     'sandbox_mode = "read-only"',
     'web_search = "disabled"',
   ].join("\n");
-  const providerTable = [
-    `[model_providers.${provider.providerId}]`,
-    `name = ${tomlString(providerName)}`,
-    `base_url = ${tomlString(baseUrl.toString())}`,
-    `wire_api = ${tomlString(wireApi)}`,
-    ...(envKey ? [`env_key = ${tomlString(envKey)}`] : []),
-    `request_max_retries = ${requestMaxRetries}`,
-    `stream_max_retries = ${streamMaxRetries}`,
-  ].join("\n");
+  let providerTable = "";
+  if (!builtinOpenai) {
+    const selected = provider!;
+    if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(selected.providerId)) throw new Error("providerId is invalid");
+    let baseUrl: URL;
+    try { baseUrl = new URL(selected.baseUrl); } catch { throw new Error("provider baseUrl is invalid"); }
+    if (!(baseUrl.protocol === "http:" || baseUrl.protocol === "https:") || baseUrl.username || baseUrl.password || baseUrl.search || baseUrl.hash) throw new Error("provider baseUrl is invalid");
+    if (selected.envKey !== undefined && !/^[A-Z_][A-Z0-9_]*$/.test(selected.envKey)) throw new Error("provider envKey is invalid");
+    if (selected.requiresOpenaiAuth !== undefined && typeof selected.requiresOpenaiAuth !== "boolean") throw new Error("requiresOpenaiAuth is invalid");
+    const requestMaxRetries = selected.requestMaxRetries ?? 0;
+    const streamMaxRetries = selected.streamMaxRetries ?? 0;
+    if (![requestMaxRetries, streamMaxRetries].every(value => Number.isInteger(value) && value >= 0 && value <= 3)) throw new Error("provider retry limits are invalid");
+    const providerName = selected.name ?? selected.providerId;
+    if (typeof providerName !== "string" || providerName.length === 0 || providerName.length > 200) throw new Error("provider name is invalid");
+    const wireApi = selected.wireApi ?? "responses";
+    if (wireApi !== "responses" && wireApi !== "chat") throw new Error("provider wireApi is invalid");
+    const authFlag = selected.requiresOpenaiAuth === true;
+    providerTable = [
+      `[model_providers.${selected.providerId}]`,
+      `name = ${tomlString(providerName)}`,
+      `base_url = ${tomlString(baseUrl.toString())}`,
+      `wire_api = ${tomlString(wireApi)}`,
+      ...(authFlag ? ["requires_openai_auth = true"] : selected.envKey ? [`env_key = ${tomlString(selected.envKey)}`] : []),
+      `request_max_retries = ${requestMaxRetries}`,
+      `stream_max_retries = ${streamMaxRetries}`,
+    ].join("\n");
+  }
   const mcp = [
     "[mcp_servers.calendar]",
     `command = ${tomlString(process.execPath)}`,
     `args = [${scriptArgs.map(tomlString).join(", ")}]`,
     `cwd = ${tomlString(config.workDir)}`,
+    `enabled_tools = [${CALENDAR_TOOL_NAMES.map(tomlString).join(", ")}]`,
+    'default_tools_approval_mode = "approve"',
+    'env_vars = ["CALENDAR_GATEWAY_URL", "CALENDAR_CAPABILITY_TOKEN"]',
   ].join("\n");
-  return `${hostControls}\n\n[features]\n${["shell_tool = false", "multi_agent = false"].join("\n")}\n\n${providerTable}\n\n${mcp}\n`;
+  return `${hostControls}\n\n[features]\n${["shell_tool = false", "multi_agent = false", "view_image = false"].join("\n")}\n\n${providerTable ? `${providerTable}\n\n` : ""}${mcp}\n`;
 }
 
 function minimalEnvironment(config: CodexHostConfig): NodeJS.ProcessEnv {
@@ -166,15 +200,23 @@ function minimalEnvironment(config: CodexHostConfig): NodeJS.ProcessEnv {
 
 export class CodexHost {
   private readonly spawn: Spawn;
+  private readonly spawnTaskkill: SpawnTaskkill;
+  private readonly platform: NodeJS.Platform;
+  private readonly closeGraceMs: number;
   private process?: SpawnedProcess;
+  private processPid?: number;
   private stdoutBuffer = "";
   private nextId = 1;
   private readonly pending = new Map<number | string, Pending>();
   private current?: RunContext;
   private closed = false;
+  private closePromise?: Promise<void>;
 
-  constructor(private readonly config: CodexHostConfig, dependencies: { spawn?: Spawn } = {}) {
+  constructor(private readonly config: CodexHostConfig, dependencies: { spawn?: Spawn; spawnTaskkill?: SpawnTaskkill; platform?: NodeJS.Platform; closeGraceMs?: number } = {}) {
     this.spawn = dependencies.spawn ?? (nodeSpawn as unknown as Spawn);
+    this.spawnTaskkill = dependencies.spawnTaskkill ?? (nodeSpawn as unknown as SpawnTaskkill);
+    this.platform = dependencies.platform ?? process.platform;
+    this.closeGraceMs = dependencies.closeGraceMs ?? CLOSE_GRACE_MS;
   }
 
   private emit(event: { kind: string; status?: string; text?: string }) {
@@ -213,8 +255,17 @@ export class CodexHost {
         if (typeof params.delta === "string") {
           const itemId = typeof params.itemId === "string" ? params.itemId : "__default__";
           context.textByItem.set(itemId, `${context.textByItem.get(itemId) ?? ""}${params.delta}`);
+          if (typeof params.phase === "string") context.phaseByItem.set(itemId, params.phase);
           context.fallbackText += params.delta;
           this.emit({ kind: "progress", status: "running" });
+        }
+        break;
+      }
+      case "item/started": {
+        const item = params.item;
+        if (item && typeof item === "object") {
+          const value = item as Record<string, unknown>;
+          if (value.type === "agentMessage" && typeof value.id === "string" && typeof value.phase === "string") context.phaseByItem.set(value.id, value.phase);
         }
         break;
       }
@@ -222,13 +273,17 @@ export class CodexHost {
         const item = params.item;
         if (item && typeof item === "object") {
           const value = item as Record<string, unknown>;
-          if (value.type === "agentMessage" && typeof value.id === "string" && typeof value.text === "string") context.textByItem.set(value.id, value.text);
+          if (value.type === "agentMessage" && typeof value.id === "string") {
+            if (typeof value.phase === "string") context.phaseByItem.set(value.id, value.phase);
+            if (typeof value.text === "string") context.textByItem.set(value.id, value.text);
+            if (!context.completedAgentItems.includes(value.id)) context.completedAgentItems.push(value.id);
+          }
         }
         break;
       }
       case "turn/completed": {
         const turn = params.turn && typeof params.turn === "object" ? params.turn as Record<string, unknown> : undefined;
-        textFromTurn(turn, context);
+        context.finalText = textFromTurn(turn, context);
         const status = turn?.status;
         const error = turn?.error && typeof turn.error === "object" ? (turn.error as Record<string, unknown>).message : undefined;
         if (status === "completed") this.settle(context, { status: "completed" });
@@ -267,6 +322,7 @@ export class CodexHost {
 
   private attachProcess(child: SpawnedProcess) {
     this.process = child;
+    this.processPid = child.pid;
     child.stdout.setEncoding?.("utf8");
     child.stderr.setEncoding?.("utf8");
     child.stdout.on("data", (chunk) => {
@@ -287,7 +343,10 @@ export class CodexHost {
       if (this.current && !this.current.settled) this.settle(this.current, { status: "failed", error: "app-server process closed" });
       for (const waiter of this.pending.values()) waiter.reject(new Error("app-server process closed"));
       this.pending.clear();
-      if (this.process === child) this.process = undefined;
+      if (this.process === child) {
+        this.process = undefined;
+        this.processPid = undefined;
+      }
     });
   }
 
@@ -297,7 +356,15 @@ export class CodexHost {
     const configText = buildCodexConfig(this.config);
     await mkdir(this.config.homeDir, { recursive: true });
     await writeFile(join(this.config.homeDir, "config.toml"), configText, "utf8");
-    const child = this.spawn(this.config.executable, ["app-server", "--stdio"], {
+    if (this.config.authFile) {
+      const isolatedAuth = join(this.config.homeDir, "auth.json");
+      try { await access(isolatedAuth); }
+      catch {
+        await copyFile(this.config.authFile, isolatedAuth);
+        await chmod(isolatedAuth, 0o600);
+      }
+    }
+    const child = this.spawn(this.config.executable, ["app-server", "--stdio", "--disable", "view_image"], {
       cwd: this.config.workDir,
       env: minimalEnvironment(this.config),
       windowsHide: true,
@@ -306,7 +373,7 @@ export class CodexHost {
     this.attachProcess(child);
     await this.request("initialize", {
       clientInfo: { name: "calendar-host", title: "Local calendar executor", version: "0.1.0" },
-      capabilities: {},
+      capabilities: { experimentalApi: true },
     });
     this.notify("initialized");
   }
@@ -345,7 +412,7 @@ export class CodexHost {
       let threadId = context.threadId;
       const threadResponse = threadId
         ? await this.request("thread/resume", { threadId, approvalPolicy: "never", sandbox: "read-only", cwd: this.config.workDir, runtimeWorkspaceRoots: [] })
-        : await this.request("thread/start", { model: this.config.model, approvalPolicy: "never", sandbox: "read-only", cwd: this.config.workDir, runtimeWorkspaceRoots: [], ephemeral: true });
+        : await this.request("thread/start", { model: this.config.model, approvalPolicy: "never", sandbox: "read-only", cwd: this.config.workDir, runtimeWorkspaceRoots: [], ephemeral: false });
       const thread = threadResponse.result?.thread;
       if (!thread || typeof thread !== "object" || typeof (thread as Record<string, unknown>).id !== "string") throw new Error("app-server did not return a thread id");
       threadId = (thread as Record<string, unknown>).id as string;
@@ -358,6 +425,7 @@ export class CodexHost {
         approvalPolicy: "never",
         sandboxPolicy: { type: "readOnly", networkAccess: false },
         runtimeWorkspaceRoots: [],
+        ...(this.config.effort === undefined ? {} : { effort: this.config.effort }),
       });
       const turn = turnResponse.result?.turn;
       if (!turn || typeof turn !== "object" || typeof (turn as Record<string, unknown>).id !== "string") throw new Error("app-server did not return a turn id");
@@ -377,7 +445,7 @@ export class CodexHost {
       threadId: context.threadId,
       turnId: context.turnId,
       status: outcome.status,
-      text: [...context.textByItem.values()].join("") || context.fallbackText,
+      text: context.finalText || context.fallbackText || [...context.textByItem.values()].join(""),
       ...(outcome.error ? { error: outcome.error } : {}),
     };
   }
@@ -394,6 +462,8 @@ export class CodexHost {
       turnId: "",
       input,
       textByItem: new Map(),
+      phaseByItem: new Map(),
+      completedAgentItems: [],
       fallbackText: "",
       resolveOutcome: value => resolveOutcome(value),
       outcomePromise: new Promise(resolve => { resolveOutcome = resolve; }),
@@ -426,16 +496,51 @@ export class CodexHost {
   }
 
   async close() {
+    if (this.closePromise) return this.closePromise;
+    this.closePromise = this.closeInternal();
+    return this.closePromise;
+  }
+
+  private async closeInternal() {
     this.closed = true;
     const context = this.current;
     if (context) this.settle(context, { status: "interrupted", error: "Codex host closed" });
     for (const waiter of this.pending.values()) waiter.reject(new Error("Codex host closed"));
     this.pending.clear();
-    if (this.process) {
-      try { this.process.stdin.end(); } catch { /* already closed */ }
-      try { this.process.kill(); } catch { /* already closed */ }
-      this.process = undefined;
+    const child = this.process;
+    if (!child) return;
+    try { child.stdin.end(); } catch { /* already closed */ }
+    const exited = await this.waitForProcessClose(child, this.closeGraceMs);
+    if (exited || this.process !== child) return;
+
+    const pid = this.processPid;
+    if (this.platform === "win32" && typeof pid === "number" && Number.isInteger(pid) && pid > 0) {
+      try {
+        const killer = this.spawnTaskkill("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+        const on = (killer as { on?: (event: "error", listener: () => void) => unknown } | undefined)?.on;
+        on?.call(killer, "error", () => undefined);
+      } catch { /* forced cleanup is best effort and must not expose process details */ }
+    } else {
+      try { child.kill("SIGTERM"); } catch { /* already closed */ }
     }
+    if (this.process === child) this.process = undefined;
+    this.processPid = undefined;
+  }
+
+  private waitForProcessClose(child: SpawnedProcess, timeoutMs: number) {
+    if (this.process !== child) return Promise.resolve(true);
+    return new Promise<boolean>(resolve => {
+      let settled = false;
+      const finish = (exited: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(exited);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      child.on("close", () => finish(true));
+      if (this.process !== child) finish(true);
+    });
   }
 }
 

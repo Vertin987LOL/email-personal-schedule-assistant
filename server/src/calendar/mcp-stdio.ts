@@ -16,6 +16,21 @@ export const CALENDAR_TOOL_NAMES = [
 ] as const;
 
 export type CalendarToolName = (typeof CALENDAR_TOOL_NAMES)[number];
+export type CalendarToolAnnotations = {
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+};
+export const CALENDAR_TOOL_ANNOTATIONS: Record<CalendarToolName, CalendarToolAnnotations> = {
+  "calendar.list": { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  "calendar.get": { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  "calendar.find_slots": { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  "calendar.preview": { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  "calendar.propose": { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  "calendar.get_operation": { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  "calendar.request_input": { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+};
 export type CalendarMcpConfig = {
   gatewayUrl?: string;
   capabilityToken?: string;
@@ -158,12 +173,12 @@ function registerCalendarTools(server: McpServer, config: CalendarMcpConfig) {
     "calendar.request_input": "Pause and ask the person for missing calendar information.",
   };
   type McpResponse = { content: [{ type: "text"; text: string }]; isError?: boolean };
-  type RegisterTool = (name: string, options: { description: string; inputSchema: z.ZodType }, callback: (args: Record<string, unknown>) => Promise<McpResponse>) => unknown;
+  type RegisterTool = (name: string, options: { description: string; inputSchema: z.ZodType; annotations: CalendarToolAnnotations }, callback: (args: Record<string, unknown>) => Promise<McpResponse>) => unknown;
   // The SDK overload preserves each schema's inferred object type. The loop is intentionally heterogeneous,
   // so this local erased view is used only at the registration boundary; runtime validation remains in zod.
   const registerTool = server.registerTool.bind(server) as unknown as RegisterTool;
   for (const name of CALENDAR_TOOL_NAMES) {
-    registerTool(name, { description: descriptions[name], inputSchema: CALENDAR_TOOL_SCHEMAS[name] }, async (args) => {
+    registerTool(name, { description: descriptions[name], inputSchema: CALENDAR_TOOL_SCHEMAS[name], annotations: CALENDAR_TOOL_ANNOTATIONS[name] }, async (args) => {
       const result = await callCalendarGateway(name, args, config);
       return { content: [{ type: "text", text: jsonText(result) }], ...(result.ok ? {} : { isError: true }) };
     });
