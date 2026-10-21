@@ -4,6 +4,7 @@ import { requireAuth } from "../auth";
 import { CalendarError, CalendarService } from "./service";
 import { CourseCalendarService, type IcsImportOptions } from "./courses";
 import { CalendarToolService, getProposalPolicy } from "./agent-tools";
+import { renderWeekSchedulePng, resolveWeekBounds } from "./week-image";
 
 export type CalendarRouterInput = DatabaseSync | CalendarService;
 
@@ -28,6 +29,23 @@ export function createCalendarRouter(input: CalendarRouterInput, ownerId = "loca
   const router = express.Router();
 
   router.use(requireAuth);
+
+  router.get("/week-image", async (req, res, next) => {
+    try {
+      const rawOffset = typeof req.query.weekOffset === "string" ? Number(req.query.weekOffset) : 0;
+      const weekOffset = Number.isFinite(rawOffset) ? Math.max(-52, Math.min(52, Math.trunc(rawOffset))) : 0;
+      const anchorDate = typeof req.query.anchorDate === "string" && req.query.anchorDate.trim() ? req.query.anchorDate.trim() : undefined;
+      const onlyConfirmed = req.query.onlyConfirmed === "1" || req.query.onlyConfirmed === "true";
+      const bounds = resolveWeekBounds({ weekOffset, anchorDate });
+      const { events } = service.listEvents(bounds.weekStartIso, bounds.weekEndIso);
+      const pngBuffer = await renderWeekSchedulePng(events, { weekOffset, anchorDate, onlyConfirmed });
+      res.setHeader("Content-Type", "image/png");
+      res.setHeader("Cache-Control", "no-store");
+      res.send(pngBuffer);
+    } catch (error) {
+      next(error);
+    }
+  });
 
   router.get("/courses", (_req, res, next) => {
     try {

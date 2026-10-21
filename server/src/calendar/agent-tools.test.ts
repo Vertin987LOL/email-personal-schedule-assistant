@@ -172,3 +172,122 @@ test("DST local-day iteration returns real one-hour instants", () => {
   for (const slot of slots) assert.equal(Date.parse(slot.endsAt) - Date.parse(slot.startsAt), 60 * 60 * 1000);
 });
 
+test("mail.list_recent returns structured email summaries and filters categories", () => {
+  const calendar = makeCalendar();
+  const sampleEmails = [
+    {
+      id: "mail-1",
+      mailboxId: "mb-1",
+      externalUid: "101",
+      subject: "辅导预约",
+      fromName: "Language Center",
+      fromAddress: "center@example.edu",
+      receivedAt: "2026-10-20T09:55:00+08:00",
+      processedAt: "2026-10-20T09:56:00+08:00",
+      category: "secondary" as const,
+      summaryZh: "一对一口语辅导预约",
+      reasonZh: "活动邀请",
+      actionItemsZh: ["通过 Portal 提交预约"],
+      originalText: "正文材料",
+      readMarked: false
+    },
+    {
+      id: "mail-2",
+      mailboxId: "mb-1",
+      externalUid: "102",
+      subject: "社保卡通知",
+      fromName: "FAO",
+      fromAddress: "office@example.edu",
+      receivedAt: "2026-10-19T18:00:00+08:00",
+      processedAt: "2026-10-19T18:01:00+08:00",
+      category: "important" as const,
+      summaryZh: "办理金融社保卡",
+      reasonZh: "重要通知",
+      actionItemsZh: ["携带身份证原件"],
+      originalText: "正文材料2",
+      readMarked: false
+    }
+  ];
+
+  let lastQueryOptions: any;
+  const mockMailQuery = (opts: any) => {
+    lastQueryOptions = opts;
+    return {
+      items: sampleEmails,
+      total: sampleEmails.length,
+      offset: 0,
+      limit: opts.limit ?? 5,
+      hasMoreBefore: false,
+      hasMoreAfter: false
+    };
+  };
+
+  const tools = new CalendarToolService(calendar, { mailQuery: mockMailQuery as any });
+  const result = data(tools.invoke("mail.list_recent", {}, context()));
+  assert.equal(result.total, 2);
+  assert.equal(result.emails.length, 2);
+  assert.deepEqual(result.emails[0], {
+    id: "mail-1",
+    subject: "辅导预约",
+    from: "center@example.edu",
+    receivedAt: "2026-10-20 09:55",
+    category: "secondary",
+    summaryZh: "一对一口语辅导预约",
+    actionItems: ["通过 Portal 提交预约"]
+  });
+  assert.equal(lastQueryOptions.limit, 5);
+  assert.equal(lastQueryOptions.excludeCategory, "ignore");
+
+  data(tools.invoke("mail.list_recent", { limit: 10, category: "important" }, context()));
+  assert.equal(lastQueryOptions.limit, 10);
+  assert.equal(lastQueryOptions.category, "important");
+
+  error(tools.invoke("mail.list_recent", { limit: 20 }, context()), "INVALID_INPUT");
+  error(tools.invoke("mail.list_recent", { category: "invalid" }, context()), "INVALID_INPUT");
+});
+
+test("mail.search queries keywords and returns results", () => {
+  const calendar = makeCalendar();
+  let lastSearchOptions: any;
+  const mockMailQuery = (opts: any) => {
+    lastSearchOptions = opts;
+    return {
+      items: [
+        {
+          id: "mail-2",
+          mailboxId: "mb-1",
+          externalUid: "102",
+          subject: "社保卡通知",
+          fromName: "FAO",
+          fromAddress: "office@example.edu",
+          receivedAt: "2026-10-19T18:00:00+08:00",
+          processedAt: "2026-10-19T18:01:00+08:00",
+          category: "important" as const,
+          summaryZh: "办理金融社保卡",
+          reasonZh: "重要通知",
+          actionItemsZh: ["携带身份证原件"],
+          originalText: "正文材料2",
+          readMarked: false
+        }
+      ],
+      total: 1,
+      offset: 0,
+      limit: opts.limit ?? 5,
+      hasMoreBefore: false,
+      hasMoreAfter: false
+    };
+  };
+
+  const tools = new CalendarToolService(calendar, { mailQuery: mockMailQuery as any });
+  const result = data(tools.invoke("mail.search", { query: "社保卡", limit: 3 }, context()));
+  assert.equal(result.query, "社保卡");
+  assert.equal(result.count, 1);
+  assert.equal(result.emails[0].id, "mail-2");
+  assert.equal(lastSearchOptions.q, "社保卡");
+  assert.equal(lastSearchOptions.limit, 3);
+  assert.equal(lastSearchOptions.excludeCategory, "ignore");
+
+  error(tools.invoke("mail.search", {}, context()), "INVALID_INPUT");
+  error(tools.invoke("mail.search", { query: " " }, context()), "INVALID_INPUT");
+});
+

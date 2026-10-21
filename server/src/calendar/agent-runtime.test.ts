@@ -11,8 +11,8 @@ const course: CalendarEventInput = { title: "线性代数", kind: "course", stat
 const lecture = { title: "科研讲座", kind: "activity", time: { kind: "interval", startsAt: "2026-10-20T14:00:00+08:00", endsAt: "2026-10-20T16:00:00+08:00", timeZone: "Asia/Shanghai" } };
 const range = { from: "2026-10-20T00:00:00+08:00", to: "2026-10-21T00:00:00+08:00" };
 function setup() { return new CalendarService(new DatabaseSync(":memory:")); }
-function executor(run: () => void | Promise<void>): ReturnType<CalendarExecutorFactory> {
-  return { async run(input) { await input.onThread?.("thread-fixture"); await input.onTurn?.("turn-fixture"); await run(); return { threadId: "thread-fixture", turnId: "turn-fixture", status: "completed", text: "已提出安排，等待确认。" }; }, cancel() {}, close() {} };
+function executor(run: () => void | Promise<void>, replyText = "已提出安排，等待确认。"): ReturnType<CalendarExecutorFactory> {
+  return { async run(input) { await input.onThread?.("thread-fixture"); await input.onTurn?.("turn-fixture"); await run(); return { threadId: "thread-fixture", turnId: "turn-fixture", status: "completed", text: replyText }; }, cancel() {}, close() {} };
 }
 
 test("host consumes conflict, continues to slots and proposal, and confirms exactly once", async () => {
@@ -173,5 +173,53 @@ test("explicit WeChat approval is bound to the sender and exact proposal", async
   assert.equal(resolveCalendarWechatCommand(runtime, { ...inbound, senderId: "me" }), true);
   assert.equal(resolveCalendarWechatCommand(runtime, { ...inbound, senderId: "me" }), true);
   assert.equal(calendar.listEvents(range.from, range.to).events.length, 1);
+  await runtime.close();
+});
+
+test("manual mail query task succeeds with tool receipt and delivers response", async () => {
+  const calendar = setup();
+  const mockMailQuery = () => ({
+    items: [
+      {
+        id: "mail-1",
+        mailboxId: "mb-1",
+        externalUid: "101",
+        subject: "辅导预约",
+        fromName: "Language Center",
+        fromAddress: "center@example.edu",
+        receivedAt: "2026-10-20T09:55:00+08:00",
+        processedAt: "2026-10-20T09:56:00+08:00",
+        category: "secondary" as const,
+        summaryZh: "一对一口语辅导预约",
+        reasonZh: "活动邀请",
+        actionItemsZh: ["通过 Portal 提交预约"],
+        originalText: "正文材料",
+        readMarked: false
+      }
+    ],
+    total: 1,
+    offset: 0,
+    limit: 5,
+    hasMoreBefore: false,
+    hasMoreAfter: false
+  });
+
+  const runtime: CalendarAgentRuntime = new CalendarAgentRuntime(
+    calendar,
+    input => executor(() => {
+      const toolRes = runtime.invoke(input.capabilityToken, "mail.list_recent", { limit: 5 });
+      assert.equal(toolRes.ok, true);
+    }, "最近有一封英语口语辅导预约邮件。"),
+    undefined,
+    undefined,
+    undefined,
+    { mailQuery: mockMailQuery as any }
+  );
+
+  const task = runtime.tasks.create({ sourceKey: "mail-query", sourceKind: "manual", text: "最近有哪些邮件" });
+  await runtime.drain();
+  const finished = runtime.tasks.get(task.id);
+  assert.equal(finished?.state, "succeeded");
+  assert.match((finished?.result as any)?.text, /最近有一封英语口语辅导预约邮件/);
   await runtime.close();
 });

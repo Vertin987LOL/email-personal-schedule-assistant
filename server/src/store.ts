@@ -1658,6 +1658,8 @@ export function updateMailboxSync(id: string, patch: Partial<Pick<Mailbox, "last
 
 export function queryProcessedEmails(options: {
   category?: string;
+  categories?: string[];
+  excludeCategory?: string;
   mailboxId?: string;
   q?: string;
   since?: string;
@@ -1669,9 +1671,19 @@ export function queryProcessedEmails(options: {
   const params: SQLInputValue[] = [];
   const allowedCategories = new Set(["important", "secondary", "ignore"]);
 
-  if (options.category && allowedCategories.has(options.category)) {
+  if (options.categories && options.categories.length > 0) {
+    const valid = options.categories.filter((c) => allowedCategories.has(c));
+    if (valid.length > 0) {
+      where.push(`category IN (${valid.map(() => "?").join(", ")})`);
+      params.push(...valid);
+    }
+  } else if (options.category && allowedCategories.has(options.category)) {
     where.push("category = ?");
     params.push(options.category);
+  }
+  if (options.excludeCategory && allowedCategories.has(options.excludeCategory)) {
+    where.push("category != ?");
+    params.push(options.excludeCategory);
   }
   if (options.mailboxId && options.mailboxId !== "all") {
     where.push("mailboxId = ?");

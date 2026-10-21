@@ -13,6 +13,8 @@ export const CALENDAR_TOOL_NAMES = [
   "calendar.propose",
   "calendar.get_operation",
   "calendar.request_input",
+  "mail.list_recent",
+  "mail.search",
 ] as const;
 
 export type CalendarToolName = (typeof CALENDAR_TOOL_NAMES)[number];
@@ -30,6 +32,8 @@ export const CALENDAR_TOOL_ANNOTATIONS: Record<CalendarToolName, CalendarToolAnn
   "calendar.propose": { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   "calendar.get_operation": { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   "calendar.request_input": { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  "mail.list_recent": { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  "mail.search": { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 };
 export type CalendarMcpConfig = {
   gatewayUrl?: string;
@@ -105,6 +109,14 @@ export const CALENDAR_TOOL_SCHEMAS = {
     question: z.string(),
     missing: z.array(z.string()).min(1).max(32),
   }),
+  "mail.list_recent": strictObject({
+    limit: z.number().int().positive().max(15).optional(),
+    category: z.enum(["all", "important", "secondary"]).optional(),
+  }),
+  "mail.search": strictObject({
+    query: z.string().min(1).max(500),
+    limit: z.number().int().positive().max(15).optional(),
+  }),
 } as const;
 
 function structuredError(code: string, message: string, recovery = "stop"): ToolResult {
@@ -172,6 +184,8 @@ function registerCalendarTools(server: McpServer, config: CalendarMcpConfig) {
     "calendar.propose": "Save a calendar change proposal for host confirmation.",
     "calendar.get_operation": "Read a prior calendar operation result.",
     "calendar.request_input": "Pause and ask the person for missing calendar information.",
+    "mail.list_recent": "List recent processed emails with summaries and action items.",
+    "mail.search": "Search processed emails using keyword full-text search.",
   };
   type McpResponse = { content: [{ type: "text"; text: string }]; isError?: boolean };
   type RegisterTool = (name: string, options: { description: string; inputSchema: z.ZodType; annotations: CalendarToolAnnotations }, callback: (args: Record<string, unknown>) => Promise<McpResponse>) => unknown;

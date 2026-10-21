@@ -83,7 +83,7 @@ export function projectPendingProposals(proposals: Proposal[], items: CalendarIt
     if (!title?.trim()) return [];
     const kind = proposal.action === "create" ? proposal.event?.kind ?? "activity" : target?.kind ?? "activity";
     const location = proposal.action === "create" ? proposal.event?.location : proposal.patch?.location ?? target?.location;
-    const conflictsWith = time.kind === "interval" ? items.filter((item) => item.id !== proposal.targetId && item.status !== "cancelled" && item.status !== "ignored" && intervalOverlaps(time, item.time)) : [];
+    const conflictsWith = time.kind === "interval" ? items.filter((item) => item.id !== proposal.targetId && item.status !== "cancelled" && item.status !== "ignored" && (item.time.kind !== "interval" || Date.parse(item.time.endsAt) - Date.parse(item.time.startsAt) <= 6 * 3600_000) && intervalOverlaps(time, item.time)) : [];
     return [{ id: `proposal:${proposal.id}`, proposal, title, kind, time, location, evidence: proposal.evidence,
       taskId: tasks.find((task) => task.proposalIds.includes(proposal.id))?.id, conflictsWith }];
   });
@@ -145,11 +145,23 @@ export function CalendarPage() {
     return () => clearInterval(timer);
   }, [reload, range]);
 
-  const visible = useMemo(() => items.filter((item) => item.status !== "cancelled" && item.status !== "ignored" &&
-    `${item.title} ${item.location ?? ""}`.toLowerCase().includes(search.toLowerCase())), [items, search]);
+  const [viewFilter, setViewFilter] = useState<"all" | "courses" | "confirmed">("all");
+  const [fullDayTime, setFullDayTime] = useState(false);
+
+  const visible = useMemo(() => items.filter((item) => {
+    if (item.status === "cancelled" || item.status === "ignored") return false;
+    if (viewFilter === "courses" && item.kind !== "course") return false;
+    if (viewFilter === "confirmed" && item.status !== "confirmed") return false;
+    return `${item.title} ${item.location ?? ""}`.toLowerCase().includes(search.toLowerCase());
+  }), [items, search, viewFilter]);
   const conflicts = useMemo(() => {
     const result = new Set<string>();
-    const active = items.filter((item) => item.status !== "cancelled" && item.status !== "ignored");
+    const active = items.filter((item) => {
+      if (item.status === "cancelled" || item.status === "ignored") return false;
+      if (item.time.kind !== "interval") return false;
+      const duration = Date.parse(item.time.endsAt) - Date.parse(item.time.startsAt);
+      return duration > 0 && duration <= 6 * 3600_000;
+    });
     for (let i = 0; i < active.length; i++) for (let j = i + 1; j < active.length; j++) {
       const a = active[i], b = active[j];
       if (a.time.kind === "interval" && b.time.kind === "interval" &&
@@ -161,7 +173,11 @@ export function CalendarPage() {
   }, [items]);
   const visibleConflictCount = visible.filter((item) => conflicts.has(item.id)).length;
   const proposalPreviews = useMemo(() => projectPendingProposals(proposals, items, agentTasks), [proposals, items, agentTasks]);
-  const visiblePreviews = proposalPreviews.filter((preview) => `${preview.title} ${preview.location ?? ""}`.toLowerCase().includes(search.toLowerCase()));
+  const visiblePreviews = proposalPreviews.filter((preview) => {
+    if (viewFilter === "courses" && preview.kind !== "course") return false;
+    if (viewFilter === "confirmed") return false;
+    return `${preview.title} ${preview.location ?? ""}`.toLowerCase().includes(search.toLowerCase());
+  });
   async function resolveEmailProposal(proposal: Proposal, decision: "approve" | "reject") {
     setBusy(true); setError(""); setNotice("");
     try {
@@ -175,26 +191,87 @@ export function CalendarPage() {
     finally { setBusy(false); }
   }
   const formalEvents: EventInput[] = visible.map((item): EventInput => {
-    const prefix = `${item.status === "tentative" ? "待确认 · " : ""}${conflicts.has(item.id) ? "重叠 · " : ""}`;
-    const color = item.kind === "course" ? "#315eaa" : item.kind === "deadline" ? "#a54a30" : item.status === "tentative" ? "#8b6a23" : "#23634f";
-    const classNames = item.status === "tentative" ? ["calendar-tentative-event"] : [];
-    if (item.time.kind === "date") return { id: item.id, title: `${prefix}${item.title}`, start: item.time.onDate, allDay: true, color, classNames };
+    const isConflict = conflicts.has(item.id);
+    const classNames = [
+      `fc-item-${item.kind}`,
+      `fc-status-${item.status}`,
+      ...(item.status === "tentative" ? ["calendar-tentative-event"] : []),
+      ...(isConflict ? ["calendar-conflict-event"] : [])
+    ];
+    const isLongOrMultiDay = item.time.kind === "interval" && (
+      Date.parse(item.time.endsAt) - Date.parse(item.time.startsAt) > 6 * 3600_000 ||
+      dateTime(item.time.startsAt).slice(0, 10) !== dateTime(item.time.endsAt).slice(0, 10)
+    );
+    if (item.time.kind === "date" || isLongOrMultiDay) {
+      const startDate = item.time.kind === "date" ? item.time.onDate : item.time.kind === "point" ? dateTime(item.time.at).slice(0, 10) : dateTime(item.time.startsAt).slice(0, 10);
+      const endDate = item.time.kind === "interval" ? dateTime(item.time.endsAt).slice(0, 10) : undefined;
+      return {
+        id: item.id,
+        title: item.title,
+        start: startDate,
+        end: endDate,
+        allDay: true,
+        classNames,
+        extendedProps: { location: item.location, kind: item.kind, status: item.status, isConflict }
+      };
+    }
     if (item.time.kind === "point") {
       const local = dateTime(item.time.at);
-      return { id: item.id, title: `${prefix}截至 ${local.slice(11)} · ${item.title}`, start: local.slice(0, 10), allDay: true, color, classNames };
+      return {
+        id: item.id,
+        title: item.title,
+        start: local.slice(0, 10),
+        allDay: true,
+        classNames,
+        extendedProps: { location: item.location, kind: item.kind, status: item.status, isConflict, isPoint: true, atTime: local.slice(11) }
+      };
     }
-    return { id: item.id, title: `${prefix}${item.title}`, start: item.time.startsAt, end: item.time.endsAt, color, classNames };
+    return {
+      id: item.id,
+      title: item.title,
+      start: item.time.startsAt,
+      end: item.time.endsAt,
+      classNames,
+      extendedProps: { location: item.location, kind: item.kind, status: item.status, isConflict }
+    };
   });
   const events: EventInput[] = formalEvents.concat(visiblePreviews.map((preview): EventInput => {
-    const conflictPrefix = preview.conflictsWith.length ? "冲突 · " : "";
-    const classNames = ["calendar-preview-event", ...(preview.conflictsWith.length ? ["calendar-preview-conflict"] : [])];
-    const color = preview.conflictsWith.length ? "#a54a30" : "#8b6a23";
-    if (preview.time.kind === "date") return { id: preview.id, title: `待确认 · ${conflictPrefix}${preview.title}`, start: preview.time.onDate, allDay: true, color, classNames };
+    const isConflict = preview.conflictsWith.length > 0;
+    const classNames = [
+      `fc-item-${preview.kind}`,
+      "fc-status-tentative",
+      "calendar-preview-event",
+      ...(isConflict ? ["calendar-preview-conflict"] : [])
+    ];
+    if (preview.time.kind === "date") {
+      return {
+        id: preview.id,
+        title: preview.title,
+        start: preview.time.onDate,
+        allDay: true,
+        classNames,
+        extendedProps: { location: preview.location, kind: preview.kind, status: "tentative", isConflict, isPreview: true }
+      };
+    }
     if (preview.time.kind === "point") {
       const local = localDateTime(preview.time.at, preview.time.timeZone);
-      return { id: preview.id, title: `待确认 · ${conflictPrefix}截至 ${local.slice(11)} · ${preview.title}`, start: local.slice(0, 10), allDay: true, color, classNames };
+      return {
+        id: preview.id,
+        title: preview.title,
+        start: local.slice(0, 10),
+        allDay: true,
+        classNames,
+        extendedProps: { location: preview.location, kind: preview.kind, status: "tentative", isConflict, isPreview: true, isPoint: true, atTime: local.slice(11) }
+      };
     }
-    return { id: preview.id, title: `待确认 · ${conflictPrefix}${preview.title}`, start: preview.time.startsAt, end: preview.time.endsAt, color, classNames };
+    return {
+      id: preview.id,
+      title: preview.title,
+      start: preview.time.startsAt,
+      end: preview.time.endsAt,
+      classNames,
+      extendedProps: { location: preview.location, kind: preview.kind, status: "tentative", isConflict, isPreview: true }
+    };
   }));
 
   function edit(item?: CalendarItem) {
@@ -265,13 +342,26 @@ export function CalendarPage() {
     await reload();
   }, [reload]);
 
+  const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
+
   return <section className="calendar-page" aria-label="本地日程">
     <div className="calendar-toolbar">
-      <div><strong>一周安排</strong><p>课程、活动和截止点 · 上海时间</p></div>
+      <div>
+        <strong>一周安排</strong>
+        <p>课程、活动和截止点 · 上海时间</p>
+      </div>
       <div className="calendar-actions">
+        <div className="calendar-segmented-filter" role="group" aria-label="视图筛选">
+          <button type="button" className={viewFilter === "all" ? "active" : ""} onClick={() => setViewFilter("all")}>全部日程</button>
+          <button type="button" className={viewFilter === "courses" ? "active" : ""} onClick={() => setViewFilter("courses")}>仅正式课程</button>
+          <button type="button" className={viewFilter === "confirmed" ? "active" : ""} onClick={() => setViewFilter("confirmed")}>已确认日程</button>
+        </div>
         <button onClick={() => { setRolling(false); calendar.current?.getApi().changeView("timeGridWeek"); calendar.current?.getApi().today(); }}>本周</button>
         <button onClick={() => { const today = Temporal.Now.plainDateISO(ZONE).toString(); setRolling(true); calendar.current?.getApi().changeView("nextSeven", today); }}>接下来7天</button>
-        <button onClick={() => { void reload(); }}>刷新</button><button onClick={() => edit()}>新建活动</button>
+        <button onClick={() => { void reload(); }}>刷新</button>
+        <button onClick={() => edit()}>新建活动</button>
+        <a href="/api/calendar/week-image" target="_blank" rel="noreferrer" className="calendar-link-btn" title="新标签页打开周日程图">🖼️ 周日程图</a>
+        <a href="/api/calendar/week-image?onlyConfirmed=true" target="_blank" rel="noreferrer" className="calendar-link-btn" title="新标签页打开纯课表图">🖼️ 纯课表图</a>
       </div>
     </div>
     {error && <p className="calendar-message error" role="alert">{error}</p>}
@@ -281,22 +371,86 @@ export function CalendarPage() {
     <CalendarDeliveries />
     <div className="calendar-layout">
       <div className="calendar-grid">
-        <div className="calendar-filter"><input aria-label="搜索活动" placeholder="搜索活动或地点" value={search} onChange={(event) => setSearch(event.target.value)} />
-          <span>{visibleConflictCount ? `${visibleConflictCount} 项与已录入日程重叠` : "本页已录入条目无重叠"} · 待确认用黄色显示</span></div>
-        <FullCalendar ref={calendar} plugins={[timeGridPlugin, dayGridPlugin, classicThemePlugin]} locale={zhCn}
-          initialView="timeGridWeek" timeZone={ZONE} firstDay={1} nowIndicator height={720} events={events}
+        <div className="calendar-filter">
+          <input aria-label="搜索活动" placeholder="搜索活动或地点" value={search} onChange={(event) => setSearch(event.target.value)} />
+          <label className="calendar-time-toggle">
+            <input type="checkbox" checked={fullDayTime} onChange={(event) => setFullDayTime(event.target.checked)} />
+            显示0-24点全天
+          </label>
+          <span>{visibleConflictCount ? `${visibleConflictCount} 项与已录入日程重叠` : "本页已录入条目无重叠"} · 鼠标悬停或点击卡片可完整展开长标题</span>
+        </div>
+        <FullCalendar
+          ref={calendar}
+          plugins={[timeGridPlugin, dayGridPlugin, classicThemePlugin]}
+          locale={zhCn}
+          initialView="timeGridWeek"
+          timeZone={ZONE}
+          firstDay={1}
+          nowIndicator
+          height={820}
+          events={events}
           headerToolbar={{ start: "prev,next", center: "title", end: "timeGridWeek,timeGridDay,dayGridMonth" }}
           views={{ nextSeven: { type: "timeGrid", duration: { days: 7 }, dateAlignment: "day" } }}
-          slotMinTime="00:00:00" slotMaxTime="24:00:00" scrollTime="08:00:00" allDayText="截止 / 全天" displayEventEnd
+          slotMinTime={fullDayTime ? "00:00:00" : "07:30:00"}
+          slotMaxTime={fullDayTime ? "24:00:00" : "22:30:00"}
+          scrollTime="08:00:00"
+          allDayText="全天 / 跨天"
+          displayEventEnd
           datesSet={(info) => setRange((old) => old?.from === info.startStr && old?.to === info.endStr ? old : { from: info.startStr, to: info.endStr })}
+          eventContent={(arg) => {
+            const p = arg.event.extendedProps as {
+              location?: string;
+              kind?: string;
+              status?: string;
+              isConflict?: boolean;
+              isPreview?: boolean;
+              isPoint?: boolean;
+              atTime?: string;
+            };
+            const isTimeGrid = arg.view.type.startsWith("timeGrid");
+            const isTentative = p.status === "tentative" || p.isPreview;
+            const isPinnedExpanded = expandedEventId === arg.event.id;
+            const tooltip = `${isTentative ? "[待确认] " : ""}${arg.event.title}\n时间：${arg.timeText || "全天"}${p.location ? `\n地点：${p.location}` : ""}`;
+            return (
+              <div
+                className={`fc-custom-event ${p.kind ?? "activity"} ${isTentative ? "tentative" : "confirmed"} ${p.isConflict ? "conflict" : ""} ${isPinnedExpanded ? "is-expanded" : ""}`}
+                title={tooltip}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setExpandedEventId((prev) => (prev === arg.event.id ? null : arg.event.id));
+                  const item = items.find((candidate) => candidate.id === arg.event.id);
+                  if (item) { edit(item); return; }
+                  const preview = proposalPreviews.find((candidate) => candidate.id === arg.event.id);
+                  if (preview) {
+                    setSelected(undefined); setSelectedPreview(preview); setNotice(""); setError("");
+                  }
+                }}
+              >
+                <div className="fc-custom-event-title">
+                  {isTentative && <span className="fc-tentative-tag">[待确认] </span>}
+                  {arg.event.title}
+                </div>
+                {isTimeGrid && (p.location || arg.timeText) && (
+                  <div className="fc-custom-event-meta">
+                    {arg.timeText && <span className="fc-time-chip">{arg.timeText}</span>}
+                    {p.location && <span className="fc-loc-chip">@{p.location}</span>}
+                  </div>
+                )}
+                {isPinnedExpanded && (
+                  <div className="fc-expanded-hint">（已展开 · 再次点击收起）</div>
+                )}
+              </div>
+            );
+          }}
           eventClick={(info) => {
             const item = items.find((candidate) => candidate.id === info.event.id);
             if (item) { edit(item); return; }
             const preview = proposalPreviews.find((candidate) => candidate.id === info.event.id);
             if (!preview) return;
             setSelected(undefined); setSelectedPreview(preview); setNotice(""); setError("");
-          }} />
-        <p className="calendar-help">{rolling ? "当前从今天起显示7天。" : "点击条目查看或修改。"}时间重叠会保留两项，截止点不占用课程时段。</p>
+          }}
+        />
+        <p className="calendar-help">{rolling ? "当前从今天起显示7天。" : "点击条目查看或修改。"}时间重叠会保留两项，跨天与长时段事项收纳至顶部全天栏。</p>
       </div>
       <aside className="calendar-editor" aria-label={selectedPreview ? "待确认预览" : selected ? "编辑活动" : "新建活动"}>
         {selectedPreview ? <>

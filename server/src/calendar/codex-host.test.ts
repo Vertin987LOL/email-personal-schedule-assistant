@@ -127,7 +127,7 @@ test("CodexHost isolates CODEX_HOME, starts the fixed protocol, and awaits hooks
   assert.match(configText, /shell_tool = false/);
   assert.match(configText, /view_image = false/);
   assert.match(configText, /mcp_servers\.calendar/);
-  assert.match(configText, /enabled_tools = \["calendar\.list", "calendar\.get", "calendar\.find_slots", "calendar\.preview", "calendar\.propose", "calendar\.get_operation", "calendar\.request_input"\]/);
+  assert.match(configText, /enabled_tools = \["calendar\.list", "calendar\.get", "calendar\.find_slots", "calendar\.preview", "calendar\.propose", "calendar\.get_operation", "calendar\.request_input", "mail\.list_recent", "mail\.search"\]/);
   assert.match(configText, /default_tools_approval_mode = "approve"/);
   assert.match(configText, /env_vars = \["CALENDAR_GATEWAY_URL", "CALENDAR_CAPABILITY_TOKEN"\]/);
   assert.match(configText, /loader\.mjs/);

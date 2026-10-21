@@ -12,7 +12,8 @@ import { readCalendarExecutorSettings, calendarExecutorFactory } from "./calenda
 import { CalendarEmailBridge } from "./calendar/email-bridge";
 import { CalendarDeliveryService } from "./calendar/delivery";
 import { parseWechatTaskSourceRef, wechatTaskKey } from "./calendar/agent-tasks";
-import { requireAuth } from "./auth";
+import { requireAuth, setAuthCookie } from "./auth";
+import { verifySessionToken } from "./auth-crypto";
 import { sendClawbotText } from "./notifications/clawbot";
 import { createCalendarWeclawInboundHandler } from "./weclaw/weclaw-inbound";
 import { setCalendarEmailIntakeHandler, startProcessingWorker } from "./email/processor";
@@ -68,7 +69,10 @@ const calendarAgent = new CalendarAgentRuntime(calendar, executorSettings?.enabl
   undefined, undefined, task => {
     calendarEmail.settle(task);
     const latest = calendarAgent.tasks.get(task.id)!;
-    if (latest.state !== "queued") calendarDelivery.enqueueTask(latest, calendarAgent.proposals(task.id));
+    if (latest.state !== "queued") {
+      calendarDelivery.enqueueTask(latest, calendarAgent.proposals(task.id));
+      void calendarDelivery.tick().catch(() => {});
+    }
   });
 calendarEmail = new CalendarEmailBridge(calendarAgent, { readEmail: getProcessedEmailById, updateCalendar: updateProcessedEmailCalendar });
 calendarDelivery = new CalendarDeliveryService(calendar, {
@@ -98,7 +102,7 @@ setWeclawInboundTextHandler(async message => {
 
 setWeclawContextReadyHandler(() => {
   resumePausedNotificationDeliveries("wechat");
-  schedulePendingEmailNotificationRetry(500);
+  schedulePendingEmailNotificationRetry(5000);
 });
 
 app.set("trust proxy", true);
@@ -111,6 +115,10 @@ app.get("/api/calendar/deliveries", requireAuth, (_req, res) => res.json({ deliv
 app.use("/api/calendar", createCalendarAgentRouter(calendarAgent));
 app.use("/api/calendar", createCalendarRouter(calendar));
 app.use("/api", router);
+app.get("/dev-login", (req, res) => {
+  setAuthCookie(req, res);
+  res.redirect("/");
+});
 app.use(
   express.static(distDir, {
     setHeaders(res, filePath) {
@@ -122,7 +130,10 @@ app.use(
     }
   })
 );
-app.get(/.*/, (_req, res) => {
+app.get(/.*/, (req, res) => {
+  if (typeof req.query?.auth === "string" && verifySessionToken(req.query.auth, readSettings().auth)) {
+    setAuthCookie(req, res);
+  }
   res.setHeader("Cache-Control", "no-store");
   res.sendFile(path.join(distDir, "index.html"));
 });

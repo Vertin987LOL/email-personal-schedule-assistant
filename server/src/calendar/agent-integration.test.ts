@@ -45,8 +45,8 @@ test("real stdio MCP adapter reaches the scoped HTTP gateway and returns a confl
         assert.ok(initialized.protocolVersion);
         child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
         const listed = await rpc("tools/list", {});
-        assert.equal(listed.tools.length, 7);
-        assert.ok(listed.tools.every((tool: { name: string }) => tool.name.startsWith("calendar.") && !tool.name.includes("approve")));
+        assert.equal(listed.tools.length, 9);
+        assert.ok(listed.tools.every((tool: { name: string }) => (tool.name.startsWith("calendar.") || tool.name.startsWith("mail.")) && !tool.name.includes("approve")));
         const checked = await rpc("tools/call", { name: "calendar.preview", arguments: { requireFree: true, event: {
           title: "科研讲座", kind: "activity", time: { kind: "interval", startsAt: "2026-10-20T14:00:00+08:00", endsAt: "2026-10-20T16:00:00+08:00", timeZone: "Asia/Shanghai" }
         } } });

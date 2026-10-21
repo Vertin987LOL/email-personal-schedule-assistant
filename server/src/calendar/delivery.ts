@@ -192,9 +192,15 @@ function proposalValue(value: CalendarDeliveryProposal): { proposal: ChangePropo
 }
 
 function taskResultText(task: CalendarTask) {
-  const result = task.result;
-  if (typeof result === "string") return result;
+  let result = task.result;
+  if (typeof result === "string") {
+    try {
+      const parsed = JSON.parse(result);
+      if (parsed && typeof parsed === "object") result = parsed;
+    } catch {}
+  }
   if (result && typeof result === "object" && typeof (result as { text?: unknown }).text === "string") return (result as { text: string }).text;
+  if (typeof result === "string") return result;
   if (result === undefined) return undefined;
   try { return JSON.stringify(result); } catch { return undefined; }
 }
@@ -445,7 +451,6 @@ export class CalendarDeliveryService {
     if (result) parts.push(result);
     if (task.state === "needs_input" && task.question) {
       parts.push(`需要补充信息：${task.question}`);
-      parts.push(`补充 ${task.id} 内容：${task.question}`);
     }
     if (task.state === "failed" || task.state === "cancelled" || task.state === "interrupted") {
       parts.push(`任务${task.state === "failed" ? "失败" : task.state === "cancelled" ? "已取消" : "已中断"}：${task.error ?? "未提供原因"}`);

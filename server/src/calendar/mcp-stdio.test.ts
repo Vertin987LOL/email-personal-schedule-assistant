@@ -61,7 +61,7 @@ test("MCP entrypoint names are environment-only configuration", () => {
   assert.equal(CALENDAR_CAPABILITY_TOKEN_ENV, "CALENDAR_CAPABILITY_TOKEN");
 });
 
-test("MCP registers the seven calendar tools with truthful annotations", () => {
+test("MCP registers the calendar and mail tools with truthful annotations", () => {
   const server = createCalendarMcpServer({ gatewayUrl, capabilityToken: "capability-token" });
   const tools = (server as unknown as { _registeredTools: Record<string, { annotations?: unknown }> })._registeredTools;
   assert.deepEqual(Object.keys(tools), [...CALENDAR_TOOL_NAMES]);
@@ -72,4 +72,6 @@ test("MCP registers the seven calendar tools with truthful annotations", () => {
   assert.deepEqual(tools["calendar.propose"].annotations, CALENDAR_TOOL_ANNOTATIONS["calendar.propose"]);
   assert.deepEqual(tools["calendar.get_operation"].annotations, CALENDAR_TOOL_ANNOTATIONS["calendar.get_operation"]);
   assert.deepEqual(tools["calendar.request_input"].annotations, CALENDAR_TOOL_ANNOTATIONS["calendar.request_input"]);
+  assert.deepEqual(tools["mail.list_recent"].annotations, CALENDAR_TOOL_ANNOTATIONS["mail.list_recent"]);
+  assert.deepEqual(tools["mail.search"].annotations, CALENDAR_TOOL_ANNOTATIONS["mail.search"]);
 });

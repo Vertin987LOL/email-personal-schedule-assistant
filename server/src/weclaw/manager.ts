@@ -737,12 +737,11 @@ export function buildContextTokenUpdatedMessage(updatedAt = new Date().toISOStri
 
 async function notifyWeclawContextTokenUpdated(userId: string, updatedAt: string, tokenChanged: boolean) {
   try {
-    await sendWeclawDirectText(userId, buildContextTokenUpdatedMessage(updatedAt, tokenChanged), 12000);
-    appendLog("system", `context token refresh confirmation sent to ${userId}`);
+    appendLog("system", `context token refreshed for ${userId} (tokenChanged=${tokenChanged})`);
     notifyWeclawContextReady(userId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    appendLog("system", `context token refresh confirmation failed for ${userId}: ${message}`);
+    appendLog("system", `context token ready notification failed for ${userId}: ${message}`);
   }
 }
 
@@ -970,9 +969,6 @@ async function monitorAccount(account: WeclawCredentialRecord, signal: AbortSign
       }
 
       const messages = Array.isArray(response?.msgs) ? response.msgs : [];
-      if (inboundTextHandler) {
-        await processWeclawInboundBatch(messages, account, inboundTextHandler);
-      }
       for (const msg of messages) {
         if (!isUserFinishedMessage(msg)) continue;
         if (String(msg?.from_user_id || "") !== account.recipientId) continue;
@@ -985,6 +981,9 @@ async function monitorAccount(account: WeclawCredentialRecord, signal: AbortSign
           );
           void notifyWeclawContextTokenUpdated(msg.from_user_id, refreshedAt, changed);
         }
+      }
+      if (inboundTextHandler) {
+        await processWeclawInboundBatch(messages, account, inboundTextHandler);
       }
       if (response?.get_updates_buf) {
         getUpdatesBuf = response.get_updates_buf;

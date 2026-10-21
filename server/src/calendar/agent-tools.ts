@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { Temporal } from "temporal-polyfill";
 import { CalendarError, CalendarService } from "./service";
 import type { CalendarEvent, CalendarEventInput, CalendarTime, EventPatch } from "./types";
+import { queryProcessedEmails } from "../store";
+import type { ProcessedEmail } from "../types";
 
 export type CalendarToolContext = {
   taskId: string;
@@ -45,7 +47,9 @@ const TOOL_NAMES = new Set([
   "calendar.preview",
   "calendar.propose",
   "calendar.get_operation",
-  "calendar.request_input"
+  "calendar.request_input",
+  "mail.list_recent",
+  "mail.search"
 ]);
 const INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -338,11 +342,57 @@ function errorResult(error: unknown): ToolResult {
   return { ok: false, error: { code: "INTERNAL_ERROR", message, recovery: "retry" } };
 }
 
+function formatReceivedAt(value?: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).formatToParts(date);
+    const y = parts.find((p) => p.type === "year")?.value;
+    const m = parts.find((p) => p.type === "month")?.value;
+    const d = parts.find((p) => p.type === "day")?.value;
+    const h = parts.find((p) => p.type === "hour")?.value;
+    const min = parts.find((p) => p.type === "minute")?.value;
+    return `${y}-${m}-${d} ${h}:${min}`;
+  } catch {
+    return value;
+  }
+}
+
+function formatEmailItem(email: ProcessedEmail) {
+  return {
+    id: email.id,
+    subject: email.subject || "无主题",
+    from: email.fromAddress || email.fromName || "未知发件人",
+    receivedAt: formatReceivedAt(email.receivedAt || email.processedAt),
+    category: email.category,
+    summaryZh: email.summaryZh || "无摘要",
+    actionItems: Array.isArray(email.actionItemsZh) ? email.actionItemsZh : []
+  };
+}
+
+export type CalendarToolServiceOptions = {
+  mailQuery?: typeof queryProcessedEmails;
+};
+
 export class CalendarToolService {
   private readonly checksTable = "calendar_tool_checks";
   private readonly operationsTable = "calendar_tool_operations";
+  private readonly mailQuery: typeof queryProcessedEmails;
 
-  constructor(private readonly calendar: CalendarService) {
+  constructor(
+    private readonly calendar: CalendarService,
+    options?: CalendarToolServiceOptions
+  ) {
+    this.mailQuery = options?.mailQuery ?? queryProcessedEmails;
     this.calendar.repository.db.exec(`
       CREATE TABLE IF NOT EXISTS ${this.checksTable} (
         checkId TEXT PRIMARY KEY,
@@ -398,6 +448,8 @@ export class CalendarToolService {
         case "calendar.propose": return this.propose(args, safeContext);
         case "calendar.get_operation": return this.getOperation(args, safeContext);
         case "calendar.request_input": return this.requestInput(args);
+        case "mail.list_recent": return this.listRecentMails(args);
+        case "mail.search": return this.searchMails(args);
         default: fail("UNKNOWN_TOOL", `unknown calendar tool: ${name}`, "stop");
       }
     } catch (error) {
@@ -577,6 +629,47 @@ export class CalendarToolService {
     if (!Array.isArray(input.missing) || input.missing.length === 0 || input.missing.length > 32) fail("INVALID_INPUT", "missing must be a non-empty array", "ask_user");
     const missing = input.missing.map((item, index) => text(item, `missing[${index}]`, 200));
     return { ok: true, data: { status: "needs_input", question: text(input.question, "question", 2_000), missing } };
+  }
+
+  private listRecentMails(args: unknown): ToolResult {
+    const input = object(args, "arguments");
+    fields(input, ["limit", "category"]);
+    const limit = input.limit === undefined ? 5 : positiveInteger(input.limit, "limit", 15);
+    const category = input.category === undefined ? "all" : enumValue(input.category, "category", ["all", "important", "secondary"] as const);
+    const queryOptions: Parameters<typeof queryProcessedEmails>[0] = { limit };
+    if (category === "all") {
+      queryOptions.excludeCategory = "ignore";
+    } else {
+      queryOptions.category = category;
+    }
+    const result = this.mailQuery(queryOptions);
+    return {
+      ok: true,
+      data: {
+        total: result.total,
+        emails: result.items.map(formatEmailItem)
+      }
+    };
+  }
+
+  private searchMails(args: unknown): ToolResult {
+    const input = object(args, "arguments");
+    fields(input, ["query", "limit"]);
+    const query = text(input.query, "query", 500);
+    const limit = input.limit === undefined ? 5 : positiveInteger(input.limit, "limit", 15);
+    const result = this.mailQuery({
+      q: query,
+      limit,
+      excludeCategory: "ignore"
+    });
+    return {
+      ok: true,
+      data: {
+        query,
+        count: result.items.length,
+        emails: result.items.map(formatEmailItem)
+      }
+    };
   }
 
   private prepareCandidate(input: Fields, ctx: CalendarToolContext) {

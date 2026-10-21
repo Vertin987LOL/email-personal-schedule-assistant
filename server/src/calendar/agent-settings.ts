@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { CodexHost, type CodexHostConfig } from "./codex-host";
 import type { CalendarExecutorFactory } from "./agent-runtime";
@@ -10,6 +11,8 @@ export type CalendarExecutorSettings = {
   effort: "low" | "medium" | "high" | "xhigh";
   builtinOpenai: true;
   authFile?: string;
+  homeDir?: string;
+  workDir?: string;
 };
 export function readCalendarExecutorSettings(rootDir: string): CalendarExecutorSettings | undefined {
   const filename = path.join(rootDir, "data", "calendar-codex", "runtime.json");
@@ -17,17 +20,20 @@ export function readCalendarExecutorSettings(rootDir: string): CalendarExecutorS
   const input: unknown = JSON.parse(fs.readFileSync(filename, "utf8"));
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("invalid calendar executor settings");
   const value = input as Record<string, unknown>;
-  if (Object.keys(value).some(key => !["enabled", "executable", "model", "effort", "builtinOpenai", "authFile"].includes(key)) ||
+  if (Object.keys(value).some(key => !["enabled", "executable", "model", "effort", "builtinOpenai", "authFile", "homeDir", "workDir"].includes(key)) ||
     typeof value.enabled !== "boolean" || value.builtinOpenai !== true || typeof value.executable !== "string" || !path.isAbsolute(value.executable) ||
     typeof value.model !== "string" || !/^[a-zA-Z0-9._-]{1,100}$/.test(value.model) ||
     !["low", "medium", "high", "xhigh"].includes(String(value.effort)) ||
-    (value.authFile !== undefined && (typeof value.authFile !== "string" || !path.isAbsolute(value.authFile)))) throw new Error("invalid calendar executor settings");
+    (value.authFile !== undefined && (typeof value.authFile !== "string" || !path.isAbsolute(value.authFile))) ||
+    (value.homeDir !== undefined && (typeof value.homeDir !== "string" || !path.isAbsolute(value.homeDir))) ||
+    (value.workDir !== undefined && (typeof value.workDir !== "string" || !path.isAbsolute(value.workDir)))) throw new Error("invalid calendar executor settings");
   return value as CalendarExecutorSettings;
 }
 export function calendarExecutorFactory(settings: CalendarExecutorSettings, rootDir: string, gatewayUrl: string): CalendarExecutorFactory {
   if (!settings.enabled) throw new Error("calendar executor is disabled");
-  const homeDir = path.join(rootDir, "data", "calendar-codex", "home");
-  const workDir = path.join(rootDir, "data", "calendar-codex", "work");
+  const homeDir = settings.homeDir ?? (process.platform === "win32" ? path.join(rootDir, "data", "calendar-codex", "home") : path.join(os.homedir(), ".calendar-codex", "home"));
+  const workDir = settings.workDir ?? (process.platform === "win32" ? path.join(rootDir, "data", "calendar-codex", "work") : path.join(os.homedir(), ".calendar-codex", "work"));
+  fs.mkdirSync(homeDir, { recursive: true });
   fs.mkdirSync(workDir, { recursive: true });
   return ({ capabilityToken }) => {
     const config: CodexHostConfig = { executable: settings.executable, model: settings.model, effort: settings.effort,

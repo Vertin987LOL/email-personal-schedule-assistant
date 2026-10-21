@@ -34,7 +34,7 @@ function cookieBase(req: express.Request) {
 }
 
 export function getSessionToken(req: express.Request) {
-  return parseCookies(req.headers.cookie).get(SESSION_COOKIE_NAME);
+  return parseCookies(req.headers.cookie).get(SESSION_COOKIE_NAME) || (typeof req.query?.auth === "string" ? req.query.auth : undefined);
 }
 
 export function isAuthenticated(req: express.Request) {
